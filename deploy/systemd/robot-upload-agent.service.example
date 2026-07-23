@@ -1,0 +1,23 @@
+[Unit]
+Description=Robot data upload agent
+After=network-online.target time-sync.target
+Wants=network-online.target
+ConditionPathIsExecutable=/opt/robot-platform/bin/robot-upload-agent
+ConditionPathExists=/etc/robot-platform/upload.token
+
+[Service]
+Type=simple
+User=robot-collector
+Group=robotdata
+EnvironmentFile=/etc/robot-platform/collector.env
+ExecStart=/opt/robot-platform/bin/robot-upload-agent run
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/spool/robot-data
+
+[Install]
+WantedBy=multi-user.target

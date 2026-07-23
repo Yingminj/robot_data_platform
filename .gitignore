@@ -1,0 +1,6 @@
+config/site.env
+deploy/management/.env
+*.local
+*.secret
+*.key
+

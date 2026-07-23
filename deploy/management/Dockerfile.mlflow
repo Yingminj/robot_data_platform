@@ -1,0 +1,13 @@
+FROM python:3.11-slim
+
+ARG MLFLOW_VERSION=3.1.1
+ARG DATA_UID=2200
+ARG DATA_GID=2200
+
+RUN groupadd --gid "${DATA_GID}" robotdata \
+    && useradd --uid "${DATA_UID}" --gid robotdata --no-create-home --shell /usr/sbin/nologin mlflow \
+    && pip install --no-cache-dir "mlflow==${MLFLOW_VERSION}" "psycopg[binary]>=3.2,<4"
+
+USER mlflow:robotdata
+WORKDIR /opt/mlflow
+

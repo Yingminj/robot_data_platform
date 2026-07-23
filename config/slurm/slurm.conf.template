@@ -1,0 +1,41 @@
+ClusterName=@@CLUSTER_NAME@@
+SlurmctldHost=@@MANAGEMENT_HOST@@(@@MANAGEMENT_IP@@)
+
+SlurmUser=slurm
+AuthType=auth/munge
+CredType=cred/munge
+StateSaveLocation=/var/lib/robot-platform/slurm-controller
+SlurmdSpoolDir=/var/lib/robot-platform/slurmd
+SlurmctldPidFile=/run/slurmctld.pid
+SlurmdPidFile=/run/slurmd.pid
+SlurmctldPort=6817
+SlurmdPort=6818
+
+SelectType=select/cons_tres
+SelectTypeParameters=CR_Core_Memory
+GresTypes=gpu
+ProctrackType=proctrack/cgroup
+TaskPlugin=task/affinity,task/cgroup
+ReturnToService=2
+SlurmctldTimeout=120
+SlurmdTimeout=300
+InactiveLimit=0
+MinJobAge=300
+KillWait=30
+Waittime=0
+
+SchedulerType=sched/backfill
+MpiDefault=none
+SwitchType=switch/none
+AccountingStorageType=accounting_storage/none
+JobCompType=jobcomp/none
+
+SlurmctldLogFile=/var/log/slurm/slurmctld.log
+SlurmdLogFile=/var/log/slurm/slurmd.log
+
+@@NODE_LINES@@
+
+PartitionName=debug Nodes=@@GPU_NODE_RANGE@@ Default=YES MaxTime=01:00:00 State=UP
+PartitionName=train Nodes=@@GPU_NODE_RANGE@@ MaxTime=7-00:00:00 State=UP
+PartitionName=eval Nodes=@@GPU_NODE_RANGE@@ MaxTime=1-00:00:00 State=UP
+
