@@ -5,3 +5,4 @@ deploy/management/.env
 *.key
 
 test_lerobot/videos
+test_lerobot/results/dinov3_global_embeddings.npz
