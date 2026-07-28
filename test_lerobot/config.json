@@ -16,12 +16,40 @@
       "crf50_max_loss": 50
     }
   },
-  "dinov3": {
-    "repo": "/home/kewei/YING/dinov3",
-    "checkpoint": "/home/kewei/YING/dinov3/dino_ckpt/dinov3_vits16_pretrain_lvd1689m-08c60483.pth",
-    "model": "dinov3_vits16",
+  "feature_evaluation": {
     "resize_size": 256,
     "crop_size": 224,
-    "batch_size": 8
+    "models": [
+      {
+        "id": "dinov3_vits16",
+        "display_name": "DINOv3 ViT-S/16",
+        "family": "DINOv3",
+        "repo": "/home/kewei/YING/dinov3",
+        "entrypoint": "dinov3_vits16",
+        "checkpoint": "/home/kewei/YING/dinov3/dino_ckpt/dinov3_vits16_pretrain_lvd1689m-08c60483.pth",
+        "patch_size": 16,
+        "batch_size": 8
+      },
+      {
+        "id": "dinov3_vitb16",
+        "display_name": "DINOv3 ViT-B/16",
+        "family": "DINOv3",
+        "repo": "/home/kewei/YING/dinov3",
+        "entrypoint": "dinov3_vitb16",
+        "checkpoint": "/home/kewei/YING/dinov3/dino_ckpt/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth",
+        "patch_size": 16,
+        "batch_size": 4
+      },
+      {
+        "id": "dinov2_vits14",
+        "display_name": "DINOv2 ViT-S/14",
+        "family": "DINOv2",
+        "repo": "/home/kewei/.cache/torch/hub/facebookresearch_dinov2_main",
+        "entrypoint": "dinov2_vits14",
+        "checkpoint": "/home/kewei/.cache/torch/hub/checkpoints/dinov2_vits14_pretrain.pth",
+        "patch_size": 14,
+        "batch_size": 8
+      }
+    ]
   }
 }

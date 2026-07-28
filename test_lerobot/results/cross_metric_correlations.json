@@ -1,17 +1,53 @@
 {
-  "crf0_min_loss": {
-    "ssim_vs_cls_cosine": 0.38875776162184833,
-    "psnr_vs_cls_cosine": 0.3590719955072366,
-    "ssim_vs_patch_cosine": 0.35305331414596963
+  "dinov3_vits16": {
+    "crf0_min_loss": {
+      "ssim_vs_cls_cosine": 0.38875776162184833,
+      "psnr_vs_cls_cosine": 0.3590719955072366,
+      "ssim_vs_patch_cosine": 0.35305331414596963
+    },
+    "crf20_balanced": {
+      "ssim_vs_cls_cosine": 0.39587235682050265,
+      "psnr_vs_cls_cosine": 0.4725339249498142,
+      "ssim_vs_patch_cosine": 0.41401165555681546
+    },
+    "crf50_max_loss": {
+      "ssim_vs_cls_cosine": 0.08191473374911888,
+      "psnr_vs_cls_cosine": 0.25643526306531506,
+      "ssim_vs_patch_cosine": 0.1069781260414016
+    }
   },
-  "crf20_balanced": {
-    "ssim_vs_cls_cosine": 0.39587235682050265,
-    "psnr_vs_cls_cosine": 0.4725339249498142,
-    "ssim_vs_patch_cosine": 0.41401165555681546
+  "dinov3_vitb16": {
+    "crf0_min_loss": {
+      "ssim_vs_cls_cosine": 0.19776848605908015,
+      "psnr_vs_cls_cosine": 0.1774526271130727,
+      "ssim_vs_patch_cosine": 0.31186593765305787
+    },
+    "crf20_balanced": {
+      "ssim_vs_cls_cosine": 0.2839638726252693,
+      "psnr_vs_cls_cosine": 0.4113030856477597,
+      "ssim_vs_patch_cosine": 0.5018527405577317
+    },
+    "crf50_max_loss": {
+      "ssim_vs_cls_cosine": -0.17011078062264823,
+      "psnr_vs_cls_cosine": 0.0003879773364886917,
+      "ssim_vs_patch_cosine": -0.2401688046967478
+    }
   },
-  "crf50_max_loss": {
-    "ssim_vs_cls_cosine": 0.08191473374911888,
-    "psnr_vs_cls_cosine": 0.25643526306531506,
-    "ssim_vs_patch_cosine": 0.1069781260414016
+  "dinov2_vits14": {
+    "crf0_min_loss": {
+      "ssim_vs_cls_cosine": 0.3553801320077334,
+      "psnr_vs_cls_cosine": 0.36853889251883254,
+      "ssim_vs_patch_cosine": 0.18784549424622532
+    },
+    "crf20_balanced": {
+      "ssim_vs_cls_cosine": 0.5004705532035484,
+      "psnr_vs_cls_cosine": 0.5536225726700016,
+      "ssim_vs_patch_cosine": 0.4549684460965453
+    },
+    "crf50_max_loss": {
+      "ssim_vs_cls_cosine": -0.11461470239308047,
+      "psnr_vs_cls_cosine": 0.11508705369447182,
+      "ssim_vs_patch_cosine": -0.009894316740217617
+    }
   }
 }
