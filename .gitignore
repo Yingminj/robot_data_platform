@@ -4,3 +4,4 @@ deploy/management/.env
 *.secret
 *.key
 
+test_lerobot/videos

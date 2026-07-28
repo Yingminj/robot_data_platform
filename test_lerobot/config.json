@@ -1,0 +1,27 @@
+{
+  "source_hdf5": "/home/kewei/NAS/自采数据集/gift/分段数据/segmentation_C4_rechunked/rosbag2_2026_07_22-09_46_42__The_right_gripper_picks_and_places_the_toy_into_the_open_box..hdf5",
+  "camera_key": "observations/images/top",
+  "camera_name": "top",
+  "source_color_order": "RGB",
+  "fps": 30,
+  "encoder": {
+    "vcodec": "libsvtav1",
+    "pix_fmt": "yuv420p",
+    "g": 2,
+    "preset": 12,
+    "fast_decode": 0,
+    "quality_levels": {
+      "crf0_min_loss": 0,
+      "crf20_balanced": 20,
+      "crf50_max_loss": 50
+    }
+  },
+  "dinov3": {
+    "repo": "/home/kewei/YING/dinov3",
+    "checkpoint": "/home/kewei/YING/dinov3/dino_ckpt/dinov3_vits16_pretrain_lvd1689m-08c60483.pth",
+    "model": "dinov3_vits16",
+    "resize_size": 256,
+    "crop_size": 224,
+    "batch_size": 8
+  }
+}

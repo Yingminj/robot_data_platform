@@ -1,0 +1,17 @@
+{
+  "crf0_min_loss": {
+    "ssim_vs_cls_cosine": 0.38875776162184833,
+    "psnr_vs_cls_cosine": 0.3590719955072366,
+    "ssim_vs_patch_cosine": 0.35305331414596963
+  },
+  "crf20_balanced": {
+    "ssim_vs_cls_cosine": 0.39587235682050265,
+    "psnr_vs_cls_cosine": 0.4725339249498142,
+    "ssim_vs_patch_cosine": 0.41401165555681546
+  },
+  "crf50_max_loss": {
+    "ssim_vs_cls_cosine": 0.08191473374911888,
+    "psnr_vs_cls_cosine": 0.25643526306531506,
+    "ssim_vs_patch_cosine": 0.1069781260414016
+  }
+}
