@@ -15,6 +15,7 @@ load_site_config
 [[ -r "${config_file}" ]] || die "missing rendered Slurm config: ${config_file}"
 ! grep -q 'FILL_ME\|@@' "${config_file}" || die "Slurm config contains unresolved placeholders"
 command -v slurmctld >/dev/null || die "slurmctld is missing; run scripts/10-install-management.sh --apply"
+command -v slurmd >/dev/null || die "slurmd is missing; the management host is also a GPU worker"
 [[ -s /etc/munge/munge.key ]] || die "/etc/munge/munge.key is missing"
 
 slurm_dir=/etc/slurm
@@ -22,15 +23,18 @@ slurm_dir=/etc/slurm
 install -d -o root -g root -m 0755 "${slurm_dir}"
 install -m 0644 "${config_file}" "${slurm_dir}/slurm.conf"
 install -m 0644 "${REPO_ROOT}/config/slurm/cgroup.conf" "${slurm_dir}/cgroup.conf"
+install -m 0644 "${REPO_ROOT}/config/slurm/gres.conf" "${slurm_dir}/gres.conf"
 
 safe_install_dir "${PLATFORM_STATE_ROOT}/slurm-controller" slurm slurm 0750
+safe_install_dir "${PLATFORM_STATE_ROOT}/slurmd" slurm slurm 0750
 safe_install_dir /var/log/slurm slurm slurm 0750
 
 systemctl enable munge
 systemctl restart munge
 munge -n | unmunge >/dev/null || die "local Munge self-test failed"
-systemctl enable slurmctld
+systemctl enable slurmctld slurmd
 systemctl restart slurmctld
-systemctl --no-pager --full status slurmctld | sed -n '1,24p'
+systemctl restart slurmd
+systemctl --no-pager --full status slurmctld slurmd | sed -n '1,40p'
 
-log "Slurm controller configuration installed"
+log "Slurm controller and management-host GPU worker configuration installed"

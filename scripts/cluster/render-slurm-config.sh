@@ -23,13 +23,7 @@ node_count="$(grep -c '^NodeName=' "${nodes_file}")"
 expected_count="$(wc -w <<<"${GPU_NODE_NAMES}")"
 [[ "${node_count}" -eq "${expected_count}" ]] || die "expected ${expected_count} nodes, found ${node_count}"
 
-first_node="$(awk '{print $1}' <<<"${GPU_NODE_NAMES}")"
-last_node="$(awk '{print $NF}' <<<"${GPU_NODE_NAMES}")"
-if [[ "${first_node}" == gpu01 && "${last_node}" == gpu04 ]]; then
-  node_range='gpu[01-04]'
-else
-  node_range="$(tr ' ' ',' <<<"${GPU_NODE_NAMES}")"
-fi
+node_range="$(tr ' ' ',' <<<"${GPU_NODE_NAMES}")"
 
 tmp_file="$(mktemp "${output_file}.XXXXXX")"
 awk \
@@ -58,4 +52,3 @@ chmod 0644 "${output_file}"
 
 log "rendered ${output_file}"
 log "review it before installing on the controller and workers"
-

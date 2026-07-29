@@ -57,8 +57,10 @@ for service_name in ssh systemd-timesyncd chrony; do check_service "${service_na
 
 if [[ "${role}" == management || "${role}" == all ]]; then
   printf '\n=== management role ===\n'
-  for command_name in docker psql mlflow slurmctld munge; do check_cmd "${command_name}"; done
-  for service_name in docker munge slurmctld; do check_service "${service_name}"; done
+  for command_name in docker psql mlflow slurmctld slurmd sbatch nvidia-smi munge; do check_cmd "${command_name}"; done
+  for service_name in docker munge slurmctld slurmd lelab-platform; do check_service "${service_name}"; done
+  nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>/dev/null || true
+  slurmd -C 2>/dev/null || true
   findmnt "${NAS_MOUNT}" || true
 fi
 

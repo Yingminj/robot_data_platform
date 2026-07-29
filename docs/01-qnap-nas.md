@@ -13,6 +13,7 @@ NAS 是原始 H5、数据集版本、标注导出、MLflow artifact 和模型发
 ├── quarantine/
 ├── annotations/
 ├── datasets/
+├── jobs/
 ├── mlflow-artifacts/
 ├── model-releases/
 ├── backups/
@@ -21,46 +22,31 @@ NAS 是原始 H5、数据集版本、标注导出、MLflow artifact 和模型发
 
 不要把已有共享根目录中的其他项目迁移或改权限。平台目录应与现有数据隔离。
 
-## 2. NFS 服务
+## 2. 第一阶段 NFS 服务
 
 在 QTS 中启用 NFSv4，并为共享文件夹添加主机访问规则：
 
-| IP | 角色 | 建议权限 |
+| IP | 角色 | 试点权限 |
 |---|---|---|
-| `192.168.100.202` | 管理机 | 读写 |
-| `192.168.100.123` | gpu01 | 只读 |
-| `192.168.100.206` | gpu02 | 只读 |
-| `192.168.100.208` | gpu03 | 只读 |
-| `192.168.100.209` | gpu04 | 只读 |
+| `192.168.100.202` | mgmt01（管理 + GPU） | 读写 |
+| `192.168.100.215` | gpu01 | 读写 |
+| `192.168.100.206` | gpu02 | 读写 |
+| `192.168.100.208` | gpu03 | 读写 |
+| `192.168.100.209` | gpu04 | 读写 |
 
-采集节点默认不挂载 NAS，而是通过管理机上传 API 写入。如果必须使用 NFS 直传，只能给该节点一个独立的 `incoming/<node-id>` 可写目录，不能开放 `raw`。
-
-不要直接对整个 `192.168.100.0/24` 开放读写。
-
-## 3. UID/GID 和 ACL
-
-当前 NFS 使用 `sec=sys`，权限依赖数字 UID/GID。部署前确认 `config/site.env` 中的 ID 未被占用，并在 QNAP 权限中做对应映射：
+五台机器使用同一个导出和挂载点 `/mnt/robot_platform`。需要至少建立：
 
 ```text
-robotdata       GID 2200
-robot-ingest    UID 2200
-robot-collector UID 2201
-robot-train     UID 2202
+datasets/
+jobs/
+mlflow-artifacts/
 ```
 
-这些只是示例默认值；如果 QNAP 或 Linux 已占用，必须在安装前整体更换。
+试点阶段不要求 QNAP 按 Linux 数字 UID/GID 建立 ACL，也不做成员级权限。QNAP 端可使用统一匿名/guest 映射或当前小组共享权限，目标是所有节点上的平台服务都能读取 `datasets`、写入各自的 `jobs/<job-id>`。仍建议只对白名单中的五个 IP 开放，而不是整个网段。
 
-推荐权限：
+注意：Slurm 自身仍要求五个 Worker 上的训练账号 UID/GID 一致。`config/site.env` 中的 `TRAIN_UID` 和 `DATA_GID` 只解决 Slurm 运行身份，不参与本阶段的 NAS 权限设计。
 
-- `raw`：`robot-ingest` 可写，`robotdata` 只读；
-- `datasets`：数据集生成服务可写，`robotdata` 只读；
-- `mlflow-artifacts`：管理机 MLflow 服务可写；
-- `backups`：仅备份服务和管理员可写；
-- 普通 Windows/SMB 用户不能写 `raw`。
-
-如果 QNAP 无法在单一共享文件夹中实现这些 ACL，创建多个共享文件夹并分别导出，不要退回到 `777`。
-
-## 4. 数据保护
+## 3. 数据保护
 
 至少配置：
 
@@ -73,7 +59,7 @@ robot-train     UID 2202
 
 NAS 快照可以恢复误删，但不能替代独立备份。
 
-## 5. NAS 验收
+## 4. NAS 验收
 
 在管理机确认：
 
@@ -83,5 +69,11 @@ findmnt /mnt/robot_platform
 df -hT /mnt/robot_platform
 ```
 
-在 GPU 节点确认挂载参数包含 `ro`；在管理机确认平台服务账号可以写 `mlflow-artifacts`。不要用普通用户在 `raw` 中创建测试文件。
+在五台节点分别确认挂载为 `rw`。使用平台训练账号验证：
 
+```bash
+sudo -u robot-train test -r /mnt/robot_platform/datasets
+sudo -u robot-train test -w /mnt/robot_platform/jobs
+```
+
+QNAP 的 UID/GID 映射、细粒度 ACL 和原始数据保护在后续正式数据治理阶段处理，不作为第一阶段训练平台上线的前置条件。

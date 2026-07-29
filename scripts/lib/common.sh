@@ -37,10 +37,12 @@ load_site_config() {
   [[ -r "${SITE_CONFIG}" ]] || die "missing ${SITE_CONFIG}; copy config/site.env.example and review it"
   # shellcheck disable=SC1090
   source "${SITE_CONFIG}"
+  TRAIN_ENV_ROOT="${TRAIN_ENV_ROOT:-/opt/robot-platform/train-venv}"
+  LEROBOT_GIT_REF="${LEROBOT_GIT_REF:-v0.6.0}"
 
   local required=(
     MANAGEMENT_HOST MANAGEMENT_IP NAS_IP NAS_EXPORT NAS_MOUNT PLATFORM_ROOT
-    DATA_GROUP DATA_GID PLATFORM_STATE_ROOT
+    DATA_GROUP DATA_GID TRAIN_USER TRAIN_UID PLATFORM_STATE_ROOT
   )
   local name
   for name in "${required[@]}"; do
@@ -68,32 +70,50 @@ validate_numeric_id() {
 
 ensure_group() {
   local group_name="$1"
-  local group_id="$2"
-  validate_numeric_id "${group_id}" "GID for ${group_name}"
+  local group_id="${2:-}"
+  if [[ -n "${group_id}" ]]; then
+    validate_numeric_id "${group_id}" "GID for ${group_name}"
+  fi
   if getent group "${group_name}" >/dev/null; then
-    local existing_gid
-    existing_gid="$(getent group "${group_name}" | cut -d: -f3)"
-    [[ "${existing_gid}" == "${group_id}" ]] || die "group ${group_name} exists with GID ${existing_gid}, expected ${group_id}"
-  elif getent group "${group_id}" >/dev/null; then
+    if [[ -n "${group_id}" ]]; then
+      local existing_gid
+      existing_gid="$(getent group "${group_name}" | cut -d: -f3)"
+      [[ "${existing_gid}" == "${group_id}" ]] \
+        || die "group ${group_name} exists with GID ${existing_gid}, expected ${group_id}"
+    fi
+    return
+  elif [[ -n "${group_id}" ]] && getent group "${group_id}" >/dev/null; then
     die "GID ${group_id} is already used by $(getent group "${group_id}" | cut -d: -f1)"
+  elif [[ -n "${group_id}" ]]; then
+    groupadd --system --gid "${group_id}" "${group_name}"
   else
-    groupadd --gid "${group_id}" "${group_name}"
+    groupadd --system "${group_name}"
   fi
 }
 
 ensure_system_user() {
   local user_name="$1"
-  local user_id="$2"
-  local primary_group="$3"
-  validate_numeric_id "${user_id}" "UID for ${user_name}"
+  local primary_group="$2"
+  local user_id="${3:-}"
+  if [[ -n "${user_id}" ]]; then
+    validate_numeric_id "${user_id}" "UID for ${user_name}"
+  fi
   if getent passwd "${user_name}" >/dev/null; then
-    local existing_uid
-    existing_uid="$(id -u "${user_name}")"
-    [[ "${existing_uid}" == "${user_id}" ]] || die "user ${user_name} exists with UID ${existing_uid}, expected ${user_id}"
-  elif getent passwd "${user_id}" >/dev/null; then
+    if [[ -n "${user_id}" ]]; then
+      local existing_uid
+      existing_uid="$(id -u "${user_name}")"
+      [[ "${existing_uid}" == "${user_id}" ]] \
+        || die "user ${user_name} exists with UID ${existing_uid}, expected ${user_id}"
+    fi
+    id -nG "${user_name}" | tr ' ' '\n' | grep -Fxq "${primary_group}" \
+      || usermod -aG "${primary_group}" "${user_name}"
+  elif [[ -n "${user_id}" ]] && getent passwd "${user_id}" >/dev/null; then
     die "UID ${user_id} is already used by $(getent passwd "${user_id}" | cut -d: -f1)"
+  elif [[ -n "${user_id}" ]]; then
+    useradd --system --uid "${user_id}" --gid "${primary_group}" --no-create-home \
+      --shell /usr/sbin/nologin "${user_name}"
   else
-    useradd --system --uid "${user_id}" --gid "${primary_group}" --no-create-home --shell /usr/sbin/nologin "${user_name}"
+    useradd --system --gid "${primary_group}" --no-create-home --shell /usr/sbin/nologin "${user_name}"
   fi
 }
 

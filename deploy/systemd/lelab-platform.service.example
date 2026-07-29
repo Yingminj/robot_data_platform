@@ -1,0 +1,21 @@
+[Unit]
+Description=Robot Platform leLab Web and Slurm gateway
+After=network-online.target remote-fs.target munge.service slurmctld.service
+Wants=network-online.target remote-fs.target
+Requires=munge.service
+
+[Service]
+Type=simple
+User=robot-train
+Group=robotdata
+WorkingDirectory=/opt/robot-platform/lelab
+EnvironmentFile=/etc/robot-platform/lelab.env
+ExecStart=/opt/robot-platform/lelab-venv/bin/python -m uvicorn lelab.server:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

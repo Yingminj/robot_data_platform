@@ -1,10 +1,10 @@
 # Run `sudo slurmd -C` on every GPU node. Copy its NodeName line here, then:
-#   1. change NodeName to gpu01/gpu02/gpu03/gpu04;
+#   1. change NodeName to mgmt01/gpu01/gpu02/gpu03/gpu04;
 #   2. add NodeAddr=<fixed-IP>;
 #   3. append Gres=gpu:1 State=UNKNOWN.
 # Values below are deliberately invalid placeholders and must not be deployed.
+NodeName=mgmt01 NodeAddr=192.168.100.202 CPUs=FILL_ME Boards=FILL_ME SocketsPerBoard=FILL_ME CoresPerSocket=FILL_ME ThreadsPerCore=FILL_ME RealMemory=FILL_ME Gres=gpu:1 State=UNKNOWN
 NodeName=gpu01 NodeAddr=192.168.100.123 CPUs=FILL_ME Boards=FILL_ME SocketsPerBoard=FILL_ME CoresPerSocket=FILL_ME ThreadsPerCore=FILL_ME RealMemory=FILL_ME Gres=gpu:1 State=UNKNOWN
 NodeName=gpu02 NodeAddr=192.168.100.206 CPUs=FILL_ME Boards=FILL_ME SocketsPerBoard=FILL_ME CoresPerSocket=FILL_ME ThreadsPerCore=FILL_ME RealMemory=FILL_ME Gres=gpu:1 State=UNKNOWN
 NodeName=gpu03 NodeAddr=192.168.100.208 CPUs=FILL_ME Boards=FILL_ME SocketsPerBoard=FILL_ME CoresPerSocket=FILL_ME ThreadsPerCore=FILL_ME RealMemory=FILL_ME Gres=gpu:1 State=UNKNOWN
 NodeName=gpu04 NodeAddr=192.168.100.209 CPUs=FILL_ME Boards=FILL_ME SocketsPerBoard=FILL_ME CoresPerSocket=FILL_ME ThreadsPerCore=FILL_ME RealMemory=FILL_ME Gres=gpu:1 State=UNKNOWN
-

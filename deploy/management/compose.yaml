@@ -42,8 +42,6 @@ services:
       dockerfile: Dockerfile.mlflow
       args:
         MLFLOW_VERSION: ${MLFLOW_VERSION}
-        DATA_UID: ${DATA_UID}
-        DATA_GID: ${DATA_GID}
     restart: unless-stopped
     depends_on:
       postgres:

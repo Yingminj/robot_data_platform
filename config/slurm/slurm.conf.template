@@ -27,6 +27,8 @@ Waittime=0
 SchedulerType=sched/backfill
 MpiDefault=none
 SwitchType=switch/none
+# The platform persists job metadata itself. Slurm state is used for live
+# scheduling; completed job metadata remains visible for MinJobAge seconds.
 AccountingStorageType=accounting_storage/none
 JobCompType=jobcomp/none
 
@@ -38,4 +40,3 @@ SlurmdLogFile=/var/log/slurm/slurmd.log
 PartitionName=debug Nodes=@@GPU_NODE_RANGE@@ Default=YES MaxTime=01:00:00 State=UP
 PartitionName=train Nodes=@@GPU_NODE_RANGE@@ MaxTime=7-00:00:00 State=UP
 PartitionName=eval Nodes=@@GPU_NODE_RANGE@@ MaxTime=1-00:00:00 State=UP
-

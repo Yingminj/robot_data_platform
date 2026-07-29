@@ -12,10 +12,10 @@ load_site_config
 
 command -v docker >/dev/null || die "Docker is missing; run scripts/10-install-management.sh --apply first"
 docker compose version >/dev/null 2>&1 || die "Docker Compose plugin is missing"
-[[ -d "${PLATFORM_ROOT}/mlflow-artifacts" ]] || die "create ${PLATFORM_ROOT}/mlflow-artifacts and its QNAP ACL first"
+[[ -d "${PLATFORM_ROOT}/mlflow-artifacts" ]] || die "create ${PLATFORM_ROOT}/mlflow-artifacts on the NAS first"
 
 if ! runuser -u "${INGEST_USER}" -- test -w "${PLATFORM_ROOT}/mlflow-artifacts"; then
-  die "${INGEST_USER} cannot write ${PLATFORM_ROOT}/mlflow-artifacts; fix QNAP numeric UID/GID ACLs"
+  die "${INGEST_USER} cannot write ${PLATFORM_ROOT}/mlflow-artifacts; enable pilot read/write access on the NAS export"
 fi
 
 safe_install_dir "${PLATFORM_STATE_ROOT}/postgres" root root 0700
@@ -31,8 +31,6 @@ if [[ ! -e "${env_file}" ]]; then
     printf 'MANAGEMENT_IP=%s\n' "${MANAGEMENT_IP}"
     printf 'PLATFORM_STATE_ROOT=%s\n' "${PLATFORM_STATE_ROOT}"
     printf 'MLFLOW_ARTIFACT_ROOT=%s\n' "${PLATFORM_ROOT}/mlflow-artifacts"
-    printf 'DATA_UID=%s\n' "${INGEST_UID}"
-    printf 'DATA_GID=%s\n' "${DATA_GID}"
     printf 'POSTGRES_USER=robotplatform\n'
     printf 'POSTGRES_PASSWORD=%s\n' "${password}"
     printf 'POSTGRES_DB=platform\n'
@@ -53,4 +51,3 @@ docker compose --env-file "${env_file}" ps
 log "management infrastructure started"
 log "MLflow: http://${MANAGEMENT_IP}:5000"
 warn "the platform API, upload worker, web UI and annotation application are not in this workspace and must be added as separate services"
-

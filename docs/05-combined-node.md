@@ -16,7 +16,7 @@ sudo ./scripts/40-install-combined-node.sh --apply
 | 类别 | 服务 |
 |---|---|
 | GPU | NVIDIA Driver、Docker、NVIDIA Toolkit、Munge、slurmd |
-| 存储 | NFS 只读挂载、本地 Dataset cache、`/work/runs` |
+| 存储 | NFS 读写挂载、本地 Dataset cache、`/work/runs` |
 | 采集 | ROS2、相机/机器人驱动、H5 converter、validator、Upload Agent |
 | 公共 | Chrony、SSH、监控 |
 
@@ -26,7 +26,7 @@ sudo ./scripts/40-install-combined-node.sh --apply
 
 - `robot-collector` 只写 `/var/spool/robot-data`；
 - `robot-train` 只写 `/cache` 和 `/work/runs`；
-- NAS 在该主机仍以只读方式挂载；
+- 第一阶段 NAS 在该主机以读写方式挂载，细粒度权限后续处理；
 - 采集数据通过管理机 API 上传；
 - 不要因为机器同时是 GPU 节点就给采集进程 `raw` 写权限。
 
@@ -66,8 +66,7 @@ sudo scontrol update NodeName=gpu01 State=RESUME
 独立采集盘  /var/spool/robot-data
 训练缓存盘  /cache/datasets
 训练工作盘  /work/runs
-NAS          /mnt/robot_platform（只读）
+NAS          /mnt/robot_platform（读写）
 ```
 
 如果只能共用一个 NVMe，应分别设置空间水位，并优先保护未 `COMMITTED` 的采集数据。
-

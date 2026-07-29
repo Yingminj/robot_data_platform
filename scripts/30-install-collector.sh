@@ -17,7 +17,7 @@ apt_install \
   openssh-server python3 python3-pip python3-venv rsync
 
 ensure_group "${DATA_GROUP}" "${DATA_GID}"
-ensure_system_user "${COLLECTOR_USER}" "${COLLECTOR_UID}" "${DATA_GROUP}"
+ensure_system_user "${COLLECTOR_USER}" "${DATA_GROUP}"
 
 safe_install_dir "${COLLECTOR_SPOOL_ROOT}" "${COLLECTOR_USER}" "${DATA_GROUP}" 0750
 for state in recording ready-to-upload uploading uploaded failed; do

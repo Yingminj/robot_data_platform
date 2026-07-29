@@ -33,7 +33,7 @@ if command -v nvidia-ctk >/dev/null 2>&1; then
 fi
 
 ensure_group "${DATA_GROUP}" "${DATA_GID}"
-ensure_system_user "${TRAIN_USER}" "${TRAIN_UID}" "${DATA_GROUP}"
+ensure_system_user "${TRAIN_USER}" "${DATA_GROUP}" "${TRAIN_UID}"
 usermod -aG docker "${TRAIN_USER}"
 
 safe_install_dir "${DATASET_CACHE_ROOT}" "${TRAIN_USER}" "${DATA_GROUP}" 0750
@@ -41,7 +41,7 @@ safe_install_dir "${EXPORT_CACHE_ROOT}" "${TRAIN_USER}" "${DATA_GROUP}" 0750
 safe_install_dir "${RUN_WORK_ROOT}" "${TRAIN_USER}" "${DATA_GROUP}" 0750
 safe_install_dir "${PLATFORM_STATE_ROOT}/slurmd" slurm slurm 0750
 
-"${SCRIPT_DIR}/50-configure-nfs-mount.sh" ro --apply
+"${SCRIPT_DIR}/50-configure-nfs-mount.sh" rw --apply
 
 systemctl enable --now docker chrony ssh
 # Do not start authentication or scheduling with an unknown/incorrect key.
