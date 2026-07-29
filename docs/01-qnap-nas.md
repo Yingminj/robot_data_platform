@@ -79,8 +79,8 @@ NAS 快照可以恢复误删，但不能替代独立备份。
 
 ```bash
 showmount -e 192.168.100.184
-findmnt /mnt/robot-platform
-df -hT /mnt/robot-platform
+findmnt /mnt/robot_platform
+df -hT /mnt/robot_platform
 ```
 
 在 GPU 节点确认挂载参数包含 `ro`；在管理机确认平台服务账号可以写 `mlflow-artifacts`。不要用普通用户在 `raw` 中创建测试文件。

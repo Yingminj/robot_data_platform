@@ -66,7 +66,7 @@ sudo scontrol update NodeName=gpu01 State=RESUME
 独立采集盘  /var/spool/robot-data
 训练缓存盘  /cache/datasets
 训练工作盘  /work/runs
-NAS          /mnt/robot-platform（只读）
+NAS          /mnt/robot_platform（只读）
 ```
 
 如果只能共用一个 NVMe，应分别设置空间水位，并优先保护未 `COMMITTED` 的采集数据。

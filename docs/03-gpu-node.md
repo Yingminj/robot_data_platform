@@ -74,7 +74,7 @@ sudo ./scripts/cluster/install-worker-config.sh \
 ```bash
 systemctl status munge slurmd
 nvidia-smi
-findmnt /mnt/robot-platform
+findmnt /mnt/robot_platform
 ```
 
 ## 5. 容器 GPU 测试

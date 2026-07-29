@@ -9,7 +9,7 @@
 | 管理机 | `192.168.100.202` |
 | QNAP NAS | `192.168.100.184:/kmd_data_file` |
 | GPU 节点 | `.123`、`.206`、`.208`、`.209` |
-| 统一挂载点 | `/mnt/robot-platform` |
+| 统一挂载点 | `/mnt/robot_platform` |
 
 ## 重要边界
 
@@ -155,6 +155,6 @@ sudo ./scripts/40-install-combined-node.sh --apply
 
 - `.209` 在前次检查中网络不可达，恢复前无法完成 4 节点验收。
 - QNAP 当前导出白名单缺少 `.123`，必须补充。
-- 现有 `/home/kewei/NAS` 是手工挂载；应迁移为统一的 `/mnt/robot-platform` 自动挂载。
+- 现有 `/home/kewei/NAS` 是手工挂载；应迁移为统一的 `/mnt/robot_platform` 自动挂载。
 - 当前共享根目录权限接近 `777`，不能直接作为正式 `raw` 区。
 - 管理机 Docker 镜像和构建缓存占用较大，正式构建前应为 Docker/数据库规划独立 SSD 空间。

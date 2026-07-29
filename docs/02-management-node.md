@@ -35,7 +35,7 @@ sudo ./scripts/10-install-management.sh --apply
 - 安装 NFS、Chrony、Munge 和 Slurm；
 - 检查或安装 Docker/Compose；
 - 创建服务账号和本地状态目录；
-- 将 NAS 持久挂载到 `/mnt/robot-platform`；
+- 将 NAS 持久挂载到 `/mnt/robot_platform`；
 - 生成管理机 Munge 密钥；
 - 暂停 Slurm Controller，等待真实节点配置。
 
@@ -46,7 +46,7 @@ sudo ./scripts/10-install-management.sh --apply
 确认以下目录已经由 QNAP 管理员创建，并对 `robot-ingest` 数字 UID 可写：
 
 ```text
-/mnt/robot-platform/robot-platform/mlflow-artifacts
+/mnt/robot_platform/mlflow-artifacts
 ```
 
 然后执行：
