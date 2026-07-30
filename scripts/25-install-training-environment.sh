@@ -11,18 +11,30 @@ load_site_config
 require_ubuntu
 
 python_bin="${TRAIN_PYTHON_BIN:-python3}"
+export PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+lerobot_git_url="${LEROBOT_GIT_URL:-https://github.com/huggingface/lerobot.git}"
 command -v "${python_bin}" >/dev/null || die "missing ${python_bin}"
 command -v nvidia-smi >/dev/null || die "missing NVIDIA driver"
 nvidia-smi >/dev/null || die "nvidia-smi cannot communicate with the GPU"
 
 apt-get update
-apt_install git python3-venv
+# evdev and other C extensions need the interpreter's dev headers (Python.h);
+# the venv module package is version-specific too. Both are skipped gracefully
+# when the interpreter does not come from APT (e.g. conda).
+py_version="$("${python_bin}" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+packages=(git build-essential)
+for pkg in "python${py_version}-venv" "python${py_version}-dev"; do
+  if apt-cache show "${pkg}" >/dev/null 2>&1; then
+    packages+=("${pkg}")
+  fi
+done
+apt_install "${packages[@]}"
 
 install -d -o root -g root -m 0755 /opt/robot-platform
 "${python_bin}" -m venv "${TRAIN_ENV_ROOT}"
 "${TRAIN_ENV_ROOT}/bin/pip" install --upgrade pip
 "${TRAIN_ENV_ROOT}/bin/pip" install \
-  "lerobot[core_scripts,training] @ git+https://github.com/huggingface/lerobot.git@${LEROBOT_GIT_REF}"
+  "lerobot[core_scripts,training,smolvla,pi] @ git+${lerobot_git_url}@${LEROBOT_GIT_REF}"
 
 chown -R "${TRAIN_USER}:${DATA_GROUP}" "${TRAIN_ENV_ROOT}"
 runuser -u "${TRAIN_USER}" -- "${TRAIN_ENV_ROOT}/bin/python" -c \

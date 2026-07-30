@@ -33,7 +33,7 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_NODES = "mgmt01,gpu01,gpu02,gpu03,gpu04"
+_DEFAULT_NODES = "mgmt01,gpu01"
 _IDLE_SLURM_STATES = frozenset({"idle"})
 
 
