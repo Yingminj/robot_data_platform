@@ -69,7 +69,7 @@ findmnt "${NAS_MOUNT}" || die "NFS mount did not become available"
 test -r "${NAS_MOUNT}" || die "NFS mount is not readable"
 
 if [[ "${mode}" == "rw" ]]; then
-  test -w "${NAS_MOUNT}" || warn "mount is rw but current root mapping is not writable; review QNAP host permissions/root squash"
+  test -w "${NAS_MOUNT}" || warn "mount is rw but the current root mapping is not writable; review QNAP host permissions (root squash or all-users-to-guest mapping)"
 else
   findmnt -rn -o OPTIONS "${NAS_MOUNT}" | tr ',' '\n' | grep -qx ro || die "expected a read-only mount"
 fi

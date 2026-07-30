@@ -59,9 +59,9 @@ for shared_dir in datasets jobs; do
   [[ -d "${PLATFORM_ROOT}/${shared_dir}" ]] || die "create ${PLATFORM_ROOT}/${shared_dir} on the NAS"
 done
 runuser -u "${TRAIN_USER}" -- test -r "${PLATFORM_ROOT}/datasets" \
-  || die "${TRAIN_USER} cannot read ${PLATFORM_ROOT}/datasets"
+  || die "${TRAIN_USER} cannot read ${PLATFORM_ROOT}/datasets; with all_squash, grant the QNAP guest account access"
 runuser -u "${TRAIN_USER}" -- test -w "${PLATFORM_ROOT}/jobs" \
-  || die "${TRAIN_USER} cannot write ${PLATFORM_ROOT}/jobs"
+  || die "${TRAIN_USER} cannot write ${PLATFORM_ROOT}/jobs; with all_squash, grant the QNAP guest account write access"
 
 chown -R "${TRAIN_USER}:${DATA_GROUP}" /opt/robot-platform/lelab-venv
 safe_install_dir "${PLATFORM_STATE_ROOT}/huggingface" "${TRAIN_USER}" "${DATA_GROUP}" 0750

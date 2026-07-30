@@ -42,7 +42,24 @@ jobs/
 mlflow-artifacts/
 ```
 
-试点阶段不要求 QNAP 按 Linux 数字 UID/GID 建立 ACL，也不做成员级权限。QNAP 端可使用统一匿名/guest 映射或当前小组共享权限，目标是所有节点上的平台服务都能读取 `datasets`、写入各自的 `jobs/<job-id>`。仍建议只对白名单中的五个 IP 开放，而不是整个网段。
+试点阶段不要求 QNAP 按 Linux 数字 UID/GID 建立 ACL，也不做成员级权限。本部署保留 QNAP 默认的"映射所有用户到 guest"（all_squash）：所有平台账号（`robot-ingest`、`robot-train`、容器内进程）在 NAS 上统一按 `guest` 评估权限，目标是所有节点上的平台服务都能读取 `datasets`、写入各自的 `jobs/<job-id>`。仍建议只对白名单中的五个 IP 开放，而不是整个网段。
+
+all_squash 模式下需要确认：
+
+1. QTS → 控制台 → 权限 → 共享文件夹 → `robot_platform`：授予 `guest` 账号 **RW**（guest 默认常被拒绝，拒绝时所有平台账号的读写都会失败，且现象与 Linux 侧权限无关）。
+2. 骨架目录只需 guest 可写。由于所有客户端用户都被映射为 guest，目录属主为 guest 即可满足全部平台服务；可直接在任一挂载点创建：
+
+   ```bash
+   sudo mkdir -p /mnt/robot_platform/{incoming,raw,quarantine,annotations,datasets,jobs,mlflow-artifacts,model-releases,backups,trash}
+   ```
+
+   若目录已存在且属主是 admin 或 `2200:2200`（guest 无权访问），需在 QNAP 上 SSH 修正，客户端 root 被映射为 guest、无权改动他人属主的目录：
+
+   ```bash
+   chmod -R 0777 /share/robot_platform/{incoming,raw,quarantine,annotations,datasets,jobs,mlflow-artifacts,model-releases}
+   ```
+
+3. 此模式下 NAS 上所有文件都归 guest 所有，无逐用户审计；数字 UID/GID ACL 和 setgid 约定推迟到数据治理阶段再启用。
 
 注意：Slurm 自身仍要求五个 Worker 上的训练账号 UID/GID 一致。`config/site.env` 中的 `TRAIN_UID` 和 `DATA_GID` 只解决 Slurm 运行身份，不参与本阶段的 NAS 权限设计。
 

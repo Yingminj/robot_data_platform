@@ -15,7 +15,7 @@ docker compose version >/dev/null 2>&1 || die "Docker Compose plugin is missing"
 [[ -d "${PLATFORM_ROOT}/mlflow-artifacts" ]] || die "create ${PLATFORM_ROOT}/mlflow-artifacts on the NAS first"
 
 if ! runuser -u "${INGEST_USER}" -- test -w "${PLATFORM_ROOT}/mlflow-artifacts"; then
-  die "${INGEST_USER} cannot write ${PLATFORM_ROOT}/mlflow-artifacts; enable pilot read/write access on the NAS export"
+  die "${INGEST_USER} cannot write ${PLATFORM_ROOT}/mlflow-artifacts; enable pilot read/write access on the NAS export (with all_squash, grant the QNAP guest account write access to the share and this directory)"
 fi
 
 safe_install_dir "${PLATFORM_STATE_ROOT}/postgres" root root 0700
