@@ -1,0 +1,24 @@
+[
+  {
+    "id": "act",
+    "label": "ACT (Action Chunking Transformer)",
+    "policy_type": "act",
+    "python_executable": "/opt/robot-platform/train-venv/bin/python",
+    "partition": "train",
+    "min_gpu_memory_mb": 8000,
+    "cpus_per_task": 8,
+    "memory_gb": 32,
+    "description": "LeRobot ACT training using the team-managed environment."
+  },
+  {
+    "id": "diffusion",
+    "label": "Diffusion Policy",
+    "policy_type": "diffusion",
+    "python_executable": "/opt/robot-platform/train-venv/bin/python",
+    "partition": "train",
+    "min_gpu_memory_mb": 12000,
+    "cpus_per_task": 8,
+    "memory_gb": 32,
+    "description": "LeRobot diffusion-policy training."
+  }
+]

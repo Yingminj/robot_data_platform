@@ -6,6 +6,3 @@ deploy/management/.env
 
 test_lerobot/videos
 *.npz
-
-# leLab is maintained and pushed as its own fork/repository.
-apps/lelab/

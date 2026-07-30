@@ -1,12 +1,12 @@
 # leLab 集群 Web
 
-第一阶段 Web 基于 `https://github.com/Yingminj/leLab` 维护。它仍是独立 Git 仓库，克隆位置为：
+第一阶段 Web 基于 `https://github.com/Yingminj/leLab` fork 修改，源码随本平台仓库统一维护，位置为：
 
 ```text
 apps/lelab/
 ```
 
-父仓库保存部署脚本，leLab fork 保存 FastAPI/React 功能修改。修改后应分别提交。
+FastAPI/React 源码、部署脚本和运行文档使用同一个父仓库提交；`apps/lelab` 不再保留嵌套 `.git`，也不是 Git submodule。
 
 ## 1. 第一阶段工作流
 
