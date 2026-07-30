@@ -1,8 +1,20 @@
-config/site.env
-deploy/management/.env
+# Local active configuration. Track the adjacent *.example or *.template
+# source instead; these files vary by site, host, or deployment.
+/config/site.env
+/config/lelab.env
+/config/slurm/nodes.conf
+/apps/lelab/config/model-templates.json
+/deploy/management/.env
+
+# Generated configuration.
+/config/slurm/*.generated
+/config/slurm/*.generated.*
+
+# Local overrides and secrets.
 *.local
 *.secret
 *.key
 
-test_lerobot/videos
+# Large experiment artifacts.
+/test_lerobot/videos/
 *.npz

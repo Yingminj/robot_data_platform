@@ -59,21 +59,49 @@ docs/
   04-collector-node.md
   05-combined-node.md
   06-cluster-finalization.md
+  07-lelab-cluster-web.md
 scripts/
-  00-audit-host.sh              只读环境检查
-  05-configure-hosts.sh         安装统一主机名解析
-  10-install-management.sh
-  15-install-lelab-platform.sh
-  20-install-gpu-node.sh
-  25-install-training-environment.sh
-  30-install-collector.sh
-  40-install-combined-node.sh
-  50-configure-nfs-mount.sh
-  90-validate-deployment.sh
-  cluster/                      Slurm 渲染和安装脚本
+  00-audit-host.sh              只读环境检查（安装前运行，不修改系统）
+  05-configure-hosts.sh         安装统一 /etc/hosts 主机名解析
+  10-install-management.sh      管理机基础组件（Slurm/Munge/Docker/NFS/账号）
+  15-install-lelab-platform.sh  leLab 集群 Web（须在 Slurm 集群就绪后）
+  20-install-gpu-node.sh        GPU Worker 基础组件
+  25-install-training-environment.sh  共享训练 venv（LeRobot + PyTorch CUDA）
+  30-install-collector.sh       采集节点账号、Spool 目录和 systemd 模板
+  40-install-combined-node.sh   合并节点（内部依次调用 20 + 30）
+  50-configure-nfs-mount.sh     NAS fstab 持久挂载（由 10/20 自动调用，勿单独运行）
+  90-validate-deployment.sh     部署后逐项验收（只读）
+  cluster/                      Slurm 配置渲染和安装脚本
 ```
 
 ## 总体部署顺序
+
+### 脚本编号规则与依赖关系
+
+`scripts/` 下脚本的编号即执行顺序。两类脚本不修改系统、可随时运行：`00-audit-host.sh`（安装前只读检查）和 `90-validate-deployment.sh`（安装后只读验收）。其余均为安装脚本，必须 `sudo` 并显式传 `--apply`，不带 `--apply` 时仅打印提示并以退出码 2 结束，不做任何修改。
+
+整体依赖关系如下：
+
+```text
+config/site.env（每台主机）
+   └─ 05-configure-hosts.sh            所有 Linux 主机，统一主机名解析
+        └─ QNAP 导出就绪（docs/01）     必须先于 10/20，否则 NFS 挂载失败
+             ├─ 管理机：00 audit → 10 → deploy/management/bootstrap.sh → 25
+             ├─ GPU 节点：00 audit → 20 → 25
+             │    └─ 5 台就绪后 cluster/ 渲染并安装 slurm.conf（集群收尾）
+             │         └─ 15-install-lelab-platform.sh（管理机，须最后装）
+             ├─ 采集节点：00 audit → 30
+             ├─ 合并节点：00 audit → 40（= 20 + 30）
+             └─ 90-validate-deployment.sh <role>  逐角色验收
+```
+
+关键顺序约束（违反会直接报错或装出不可用的系统）：
+
+- **QNAP 必须先于 10/20**：`10`/`20` 内部会自动调用 `50-configure-nfs-mount.sh rw --apply` 并验证挂载可读，QNAP 导出白名单未包含本机时在此失败；
+- **`25` 必须在同节点的 `10`/`20` 之后**：训练账号 `robot-train`（`TRAIN_USER`）由 `10`/`20` 创建，`25` 安装完 venv 后要 `chown` 给该账号；
+- **`15` 的编号虽小于 `20`/`25`，实际执行在最后**：它依赖 `sbatch`/`squeue`/`scontrol`/`sinfo` 等 Slurm 命令和已渲染的集群配置，必须在集群收尾完成后、且只在管理机上运行；
+- **`bootstrap.sh` 必须在 `10` 之后**：它要求 Docker 已就绪；
+- **`40` 不单独做基础安装**：它内部依次调用 `20` 和 `30`，因此合并节点只需跑 `40` 再加资源隔离配置。
 
 ### 1. 准备统一配置
 
@@ -91,15 +119,32 @@ editor config/site.env
 - `robot-train`/`robotdata` 的 UID/GID 在五个 Slurm Worker 上没有冲突；它们仅用于 Slurm 身份一致性，不用于 QNAP 权限管理；
 - 本地缓存、Spool 和工作目录位于预期磁盘。
 
+注意事项：
+
+- 缺少 `config/site.env` 时所有脚本直接退出；`MANAGEMENT_IP`、`NAS_IP`、`TRAIN_UID` 等必填项为空也会立即报错；
+- `TRAIN_UID`/`DATA_GID` 若与现有账号冲突，安装脚本会拒绝执行（不会抢占已占用的 UID/GID），需在全部节点统一调整后重跑；
+- `TRAIN_PYTHON_BIN` 默认为 `python3.12`：LeRobot v0.6.0 要求 Python ≥ 3.12，而 Ubuntu 22.04 自带 python3 是 3.10，22.04 主机需先自行安装 Python 3.12；
+- 训练环境默认使用清华 PyPI 镜像（`PIP_INDEX_URL`）和 gh-proxy 的 LeRobot Git 镜像（`LEROBOT_GIT_URL`），离线或直连环境请按实际情况改写。
+
 所有 Linux 主机确认配置后可安装统一的静态主机名解析：
 
 ```bash
 sudo ./scripts/05-configure-hosts.sh --apply
 ```
 
+注意事项：
+
+- 该脚本只管理 `/etc/hosts` 中带 `BEGIN/END robot-platform` 标记的块；若已有标记块内容与期望不一致，脚本会报错退出并要求人工核对，不会自动覆盖；
+- 必须在安装任何角色组件之前完成，Munge/Slurm 的节点间认证依赖主机名解析一致。
+
 ### 2. 配置 QNAP
 
 先按照 [QNAP NAS 配置](docs/01-qnap-nas.md)创建目录，并允许 5 台主机通过 NFS 读写。试点阶段不要求 QNAP 按 Linux 数字 UID/GID 建立 ACL，也不配置成员级权限。
+
+注意事项：
+
+- 导出白名单必须包含全部 5 台主机（当前缺少 `.123`，需先补充），否则第 3/4 步在挂载校验处失败；
+- 当前导出为 all_squash（全部映射为 guest），骨架目录只需 QNAP guest 账号可写；脚本发现 rw 挂载但 root 不可写时会给出警告，提示检查 QNAP 的 squash/ guest 映射设置。
 
 ### 3. 安装管理机兼 GPU 节点
 
@@ -115,6 +160,14 @@ sudo ./deploy/management/bootstrap.sh --apply
 sudo ./scripts/25-install-training-environment.sh --apply
 ```
 
+注意事项：
+
+- 脚本不会安装或升级 NVIDIA 驱动，必须先自行装好并确认 `nvidia-smi` 可用，否则 `10`/`20`/`25` 都会在中途退出；
+- `10` 会自动创建 `robot-train`/`robot-ingest` 账号、缓存目录，并以 `rw` 模式完成 NAS 持久挂载（写入 `/etc/fstab`，修改前自动备份为带时间戳的 `.bak`）；若 `NAS_MOUNT` 已被其他来源挂载，脚本报错退出；
+- Docker 缺失时默认自动安装 Ubuntu 仓库的 `docker.io` + Compose 插件；如需使用预装 Docker Engine，在 `site.env` 设 `ALLOW_DOCKER_INSTALL=0`；
+- `25` 会在 `TRAIN_ENV_ROOT`（默认 `/opt/robot-platform/train-venv`）创建 venv 并从 Git 安装 LeRobot，耗时较长且需要访问 PyPI/Git 镜像；安装末尾会用 `robot-train` 身份校验 `torch.cuda.is_available()`，CUDA 不可用时判定为失败；
+- 重复执行是安全的：账号、目录、fstab 条目均按标记幂等处理。
+
 详细步骤见[管理机安装](docs/02-management-node.md)。
 
 ### 4. 安装 GPU 节点
@@ -127,7 +180,13 @@ sudo ./scripts/20-install-gpu-node.sh --apply
 sudo ./scripts/25-install-training-environment.sh --apply
 ```
 
-然后在包括管理机在内的 5 台主机收集 `slurmd -C`，生成全节点 `slurm.conf`。详细步骤见 [GPU 节点安装](docs/03-gpu-node.md)和[集群收尾](docs/06-cluster-finalization.md)。
+然后在包括管理机在内的 5 台主机收集 `slurmd -C`，用 `scripts/cluster/render-slurm-config.sh` 渲染全节点 `slurm.conf`，再分别在管理机执行 `cluster/install-controller-config.sh`、在各 Worker 执行 `cluster/install-worker-config.sh`。详细步骤见 [GPU 节点安装](docs/03-gpu-node.md)和[集群收尾](docs/06-cluster-finalization.md)。
+
+注意事项：
+
+- `install-controller-config.sh` 依赖 `10` 装好的 `slurmctld`，`install-worker-config.sh` 依赖 `20` 装好的 `slurmd`，顺序不能颠倒；
+- 全部 5 台主机时间必须同步（角色安装脚本已启用 chrony，验收脚本会检查 `NTPSynchronized`），否则 Munge 认证失败；
+- 5 台 Worker 全部就绪前不要进入下一步安装 leLab。
 
 ### 5. 安装 leLab 集群 Web
 
@@ -139,6 +198,12 @@ sudo ./scripts/15-install-lelab-platform.sh --apply
 
 Web 默认监听 `http://192.168.100.202:8000`。详细配置见 [leLab 集群 Web](docs/07-lelab-cluster-web.md)。
 
+注意事项：
+
+- 前置条件缺一不可：仓库内 `apps/lelab/` 源码、Python 3.12（`LELAB_PYTHON_BIN`）、Node.js ≥ 20.19 与 npm、可用的 Slurm 客户端命令；
+- 安装过程会校验 `robot-train` 对 NAS `datasets/` 可读、`jobs/` 可写；all_squash 下若失败，需在 QNAP 侧放开 guest 账号权限；
+- 不要在 Slurm 集群收尾（第 4 步）完成前执行本步。
+
 ### 6. 安装采集节点
 
 ```bash
@@ -146,7 +211,12 @@ Web 默认监听 `http://192.168.100.202:8000`。详细配置见 [leLab 集群 W
 sudo ./scripts/30-install-collector.sh --apply
 ```
 
-采集节点不应直接获得 NAS `raw` 写权限。详细步骤见[采集节点安装](docs/04-collector-node.md)。
+注意事项：
+
+- 脚本只安装 OS 前置组件、`robot-collector` 账号、Spool 状态目录（`recording` → `ready-to-upload` → `uploading` → `uploaded`/`failed`）和 systemd 模板；ROS2、H5 转换/校验和 Upload Agent 业务程序不在本仓库，需另行部署到 `/opt/robot-platform/bin/robot-upload-agent` 并配置上传令牌后服务才会启动；
+- 采集节点不应直接获得 NAS `raw` 写权限，数据一律经管理机 API 上传。
+
+详细步骤见[采集节点安装](docs/04-collector-node.md)。
 
 ### 7. 合并节点
 
@@ -157,7 +227,11 @@ sudo ./scripts/30-install-collector.sh --apply
 sudo ./scripts/40-install-combined-node.sh --apply
 ```
 
-还必须配置资源隔离和采集窗口，见[采集与 GPU 合并节点](docs/05-combined-node.md)。
+注意事项：
+
+- `40` 只是依次调用 `20` + `30`，因此合并节点不要再单独跑 `20`/`30`；
+- 安装后还必须配置资源隔离（cgroup）和采集窗口；采集需要独占 GPU 或高磁盘带宽时，应先 `scontrol drain` 该 Slurm 节点，见[采集与 GPU 合并节点](docs/05-combined-node.md)；
+- 合并节点上的采集服务同样只走管理机 API，不得授予 NAS `raw` 写权限。
 
 ### 8. 验收
 
@@ -168,7 +242,16 @@ sudo ./scripts/40-install-combined-node.sh --apply
 ./scripts/90-validate-deployment.sh combined
 ```
 
+验收脚本逐项检查时间同步、管理机/NAS 可达性、NFS 挂载及可写性、Docker/Munge/Slurm 服务、`nvidia-smi`、训练环境、leLab 与 MLflow 健康端点、`sinfo` 节点上报等，任一 FAIL 都应先修复再复跑。
+
 第一阶段验收以“NAS 选数据 → 选择登记模型模板 → 自动选择空闲 GPU → Slurm 单机单卡训练 → checkpoint 中断续训”的真实短任务闭环为准；单纯“服务为 active”不等于平台完成。上传、QC、标注和 DatasetVersion 属于后续数据治理阶段。
+
+### 通用注意事项
+
+- **重复执行**：所有安装脚本按幂等设计（账号/目录/挂载按标记识别），失败后修正问题可直接重跑同一脚本；
+- **不会做的事**：脚本不会安装 NVIDIA 驱动、不会格式化磁盘、不会覆盖人工修改过的 `/etc/hosts` 托管块和异源挂载；
+- **失败排查顺序**：先看脚本输出的 `ERROR` 行，再对照 `00-audit-host.sh <role>` 的 MISSING/INACTIVE 项；多数失败源于 QNAP 白名单、驱动未装、UID/GID 冲突或主机名解析不一致；
+- **私密信息**：`config/site.env`、`deploy/management/.env`、Munge 密钥和上传令牌一律不得提交到版本库。
 
 ## 当前环境注意事项
 
