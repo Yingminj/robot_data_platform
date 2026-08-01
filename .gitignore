@@ -18,3 +18,10 @@
 # Large experiment artifacts.
 /test_lerobot/videos/
 *.npz
+*.hdf5
+
+artifacts/
+
+.vscode/
+
+dataset/

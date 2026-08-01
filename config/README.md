@@ -39,3 +39,22 @@ cp config/slurm/nodes.conf.example config/slurm/nodes.conf
 ```
 
 生成的 `config/slurm/slurm.conf.generated` 也被 Git 忽略；请通过受控临时通道分发给 Worker，并在安装完成后删除临时副本。
+
+## 活动配置不会自动覆盖
+
+以下安装脚本采用“文件不存在时才创建”的策略：
+
+- `15-install-lelab-platform.sh` 不覆盖 `/etc/robot-platform/lelab.env`；
+- `15-install-lelab-platform.sh` 不覆盖 `/etc/robot-platform/model-templates.json`；
+- `bootstrap.sh` 不覆盖 `deploy/management/.env`；
+- `30-install-collector.sh` 不覆盖 `/etc/robot-platform/collector.env`。
+
+因此修改仓库中的 `*.example` 后，已经安装的主机不会自动同步。应人工比较并编辑活动配置，再重启对应服务。
+
+当前 leLab 节点映射中，左侧是 Slurm NodeName，右侧是 SSH 目标：
+
+```bash
+LELAB_CLUSTER_NODES=mgmt01=192.168.100.202,gpu01=snorlax@192.168.100.215
+```
+
+完整 SSH 设置见 [leLab 集群 Web](../docs/07-lelab-cluster-web.md)。

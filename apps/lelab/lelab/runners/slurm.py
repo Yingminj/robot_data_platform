@@ -53,7 +53,7 @@ class SlurmJobRunner:
     """Submit through ``sbatch`` and tail the shared Slurm output file.
 
     ``LELAB_OUTPUT_ROOT`` must point to a path visible at the same absolute
-    location on all five hosts (normally the NFS ``jobs`` directory). This
+    location on every worker (normally the NFS ``jobs`` directory). This
     makes logs and checkpoints available to the management Web process and
     allows a later run to resume on another node.
     """

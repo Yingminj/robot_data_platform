@@ -4,7 +4,7 @@ NAS 是原始 H5、数据集版本、标注导出、MLflow artifact 和模型发
 
 ## 1. 存储布局
 
-优先在 QNAP 中创建一个独立共享文件夹 `robot-platform`。如果现阶段只能继续使用 `/kmd_data_file`，至少创建专用子目录：
+优先在 QNAP 中创建一个独立共享文件夹 `robot_platform`，与 `config/site.env.example` 中的 `NAS_EXPORT=/robot_platform` 一致。如果现阶段只能继续使用 `/kmd_data_file`，应创建专用子目录，并把 `NAS_EXPORT` 改成 QNAP 实际公布的 NFS 导出路径：
 
 ```text
 /kmd_data_file/robot-platform/
@@ -30,11 +30,8 @@ NAS 是原始 H5、数据集版本、标注导出、MLflow artifact 和模型发
 |---|---|---|
 | `192.168.100.202` | mgmt01（管理 + GPU） | 读写 |
 | `192.168.100.215` | gpu01 | 读写 |
-| `192.168.100.206` | gpu02 | 读写 |
-| `192.168.100.208` | gpu03 | 读写 |
-| `192.168.100.209` | gpu04 | 读写 |
 
-五台机器使用同一个导出和挂载点 `/mnt/robot_platform`。需要至少建立：
+当前两台机器使用同一个导出和挂载点 `/mnt/robot_platform`。以后增加 Worker 时，必须先把新节点的固定 IP 加入 QNAP 白名单。需要至少建立：
 
 ```text
 datasets/
@@ -42,7 +39,7 @@ jobs/
 mlflow-artifacts/
 ```
 
-试点阶段不要求 QNAP 按 Linux 数字 UID/GID 建立 ACL，也不做成员级权限。本部署保留 QNAP 默认的"映射所有用户到 guest"（all_squash）：所有平台账号（`robot-ingest`、`robot-train`、容器内进程）在 NAS 上统一按 `guest` 评估权限，目标是所有节点上的平台服务都能读取 `datasets`、写入各自的 `jobs/<job-id>`。仍建议只对白名单中的五个 IP 开放，而不是整个网段。
+试点阶段不要求 QNAP 按 Linux 数字 UID/GID 建立 ACL，也不做成员级权限。本部署保留 QNAP 默认的"映射所有用户到 guest"（all_squash）：所有平台账号（`robot-ingest`、`robot-train`、容器内进程）在 NAS 上统一按 `guest` 评估权限，目标是所有节点上的平台服务都能读取 `datasets`、写入各自的 `jobs/<job-id>`。仍建议只对白名单中的平台节点开放，而不是整个网段。
 
 all_squash 模式下需要确认：
 
@@ -53,15 +50,11 @@ all_squash 模式下需要确认：
    sudo mkdir -p /mnt/robot_platform/{incoming,raw,quarantine,annotations,datasets,jobs,mlflow-artifacts,model-releases,backups,trash}
    ```
 
-   若目录已存在且属主是 admin 或 `2200:2200`（guest 无权访问），需在 QNAP 上 SSH 修正，客户端 root 被映射为 guest、无权改动他人属主的目录：
-
-   ```bash
-   chmod -R 0777 /share/robot_platform/{incoming,raw,quarantine,annotations,datasets,jobs,mlflow-artifacts,model-releases}
-   ```
+   若目录已存在但 guest 无权访问，应优先使用 QTS 的共享文件夹权限界面，把平台共享及这些专用子目录授权给 guest。客户端 root 也会被映射为 guest，通常无权在挂载端修改服务端属主。不要对整个已有共享执行递归 `chmod 0777`。
 
 3. 此模式下 NAS 上所有文件都归 guest 所有，无逐用户审计；数字 UID/GID ACL 和 setgid 约定推迟到数据治理阶段再启用。
 
-注意：Slurm 自身仍要求五个 Worker 上的训练账号 UID/GID 一致。`config/site.env` 中的 `TRAIN_UID` 和 `DATA_GID` 只解决 Slurm 运行身份，不参与本阶段的 NAS 权限设计。
+注意：Slurm 自身仍要求所有 Worker 上的训练账号 UID/GID 一致。`config/site.env` 中的 `TRAIN_UID` 和 `DATA_GID` 只解决 Slurm 运行身份，不参与本阶段的 NAS 权限设计。
 
 ## 3. 数据保护
 
@@ -86,7 +79,7 @@ findmnt /mnt/robot_platform
 df -hT /mnt/robot_platform
 ```
 
-在五台节点分别确认挂载为 `rw`。使用平台训练账号验证：
+在 `mgmt01` 和 `gpu01` 分别确认挂载为 `rw`。使用平台训练账号验证：
 
 ```bash
 sudo -u robot-train test -r /mnt/robot_platform/datasets

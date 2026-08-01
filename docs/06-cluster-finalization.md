@@ -1,34 +1,85 @@
-# Slurm 集群收尾与验收
+# Slurm 双节点集群收尾与验收
 
-## 0. 统一地址解析
+本文是当前 `mgmt01 + gpu01` 集群的权威配置顺序。所有“在管理机执行”的命令都从 `mgmt01` 仓库根目录运行；“在 Worker 执行”的命令都从 `gpu01` 仓库根目录运行。
 
-在管理机和 4 台远程 GPU 节点使用相同的 `config/site.env`，然后执行：
+## 0. 完成条件
+
+进入本阶段前：
+
+- `mgmt01` 已执行 `10` 和 `25`；
+- `gpu01` 已执行 `20` 和 `25`；
+- 两台机器已安装相同的 Slurm 26.05.2；
+- 两台机器都使用 cgroup v2；
+- 两台机器主机名、时间和 `/etc/hosts` 正确；
+- QNAP 在相同绝对路径 `/mnt/robot_platform` 挂载；
+- `robot-train` 和 `robotdata` 的数字 UID/GID 一致。
+
+快速核对：
 
 ```bash
-sudo ./scripts/05-configure-hosts.sh --apply
+hostname -s
+slurmd -V
+stat -fc %T /sys/fs/cgroup
+id robot-train
+getent group robotdata
+getent hosts mgmt01 gpu01
+findmnt /mnt/robot_platform
 ```
 
-执行前必须确认没有现有 DNS 或 `/etc/hosts` 冲突。脚本发现同名旧条目时会停止，不会覆盖。
+## 1. 收集节点资源
 
-## 1. 准备节点资源文件
+两台主机分别执行：
 
-在管理机：
+```bash
+sudo slurmd -C
+```
+
+在 `mgmt01` 复制模板：
 
 ```bash
 cp config/slurm/nodes.conf.example config/slurm/nodes.conf
 editor config/slurm/nodes.conf
 ```
 
-把 5 台主机的 `slurmd -C` 输出填入对应行，包含 `mgmt01`，并保留固定的 `NodeName`、`NodeAddr` 和 `Gres=gpu:1`。`mgmt01` 的 `RealMemory` 应额外为 leLab、Slurm Controller、PostgreSQL、Redis 和 MLflow 预留空间。确认没有 `FILL_ME`：
+每行都应：
+
+- 使用固定 `NodeName=mgmt01` 或 `NodeName=gpu01`；
+- 使用对应 `NodeAddr`；
+- 保留本机 `slurmd -C` 的 CPU 拓扑；
+- 设置略低于物理内存的 `RealMemory`；
+- 追加 `Gres=gpu:1 State=UNKNOWN`。
+
+当前结构示例：
+
+```ini
+NodeName=mgmt01 NodeAddr=192.168.100.202 CPUs=... RealMemory=... Gres=gpu:1 State=UNKNOWN
+NodeName=gpu01 NodeAddr=192.168.100.215 CPUs=... RealMemory=... Gres=gpu:1 State=UNKNOWN
+```
+
+不要保留 `FILL_ME`，也不要把一台机器的硬件行复制给另一台。
+
+## 2. 渲染并审查配置
+
+在 `mgmt01`：
 
 ```bash
 ./scripts/cluster/render-slurm-config.sh
-less config/slurm/slurm.conf.generated
+sed -n '1,240p' config/slurm/slurm.conf.generated
 ```
 
-所有节点与管理机必须使用同一 Slurm 主版本。Ubuntu 22.04 自带包可能较旧；在启用 `cgroup.conf` 前，应确认所安装版本支持主机当前的 cgroup v2。若版本不满足要求，应统一使用组织批准的较新 Slurm 包或构建产物，不能混用不同主版本。
+确认：
 
-## 2. 启动 Controller 和管理机 Worker
+```bash
+! grep -E 'FILL_ME|@@' config/slurm/slurm.conf.generated
+grep '^NodeName=' config/slurm/slurm.conf.generated
+grep '^PartitionName=' config/slurm/slurm.conf.generated
+```
+
+预期包含两个节点和 `debug`、`train`、`eval` 三个分区。
+
+## 3. 安装 Controller 和 mgmt01 Worker
+
+在 `mgmt01`：
 
 ```bash
 sudo ./scripts/cluster/install-controller-config.sh \
@@ -36,71 +87,168 @@ sudo ./scripts/cluster/install-controller-config.sh \
   --apply
 ```
 
-该脚本同时启动 `slurmctld` 和管理机上的 `slurmd`。
+该脚本会把以下文件装入 `/etc/slurm`：
 
-## 3. 分发配置和 Munge 密钥
+```text
+slurm.conf
+cgroup.conf
+gres.conf
+```
 
-所有节点必须使用完全相同的：
+并重启 `munge`、`slurmctld` 和本机 `slurmd`。检查：
+
+```bash
+systemctl is-active munge slurmctld slurmd
+munge -n | unmunge | sed -n '1,12p'
+sudo slurmd -G
+scontrol ping
+```
+
+## 4. 安装 gpu01 Worker
+
+Worker 必须获得与管理机完全相同的：
 
 - `/etc/munge/munge.key`；
-- `slurm.conf`；
-- `cgroup.conf`；
-- 主机名和地址解析。
+- 生成的 `slurm.conf`；
+- 仓库中的 `cgroup.conf` 和 `gres.conf`。
 
-Munge 密钥属于集群机密。应使用已有的安全配置管理工具，或通过管理员控制的临时加密通道分发。不要把它复制进本工作区、Git、NAS 公共目录或聊天记录。
+Munge 密钥只能经管理员控制的临时通道传输，不能放入 Git、NAS 公共目录或聊天记录。
 
-在节点上使用：
+具体的 `scp` 暂存命令见 [GPU Worker 安装：接收并安装集群配置](03-gpu-node.md#7-接收并安装集群配置)。
+
+在 `gpu01` 的调用形式是：
 
 ```bash
 sudo ./scripts/cluster/install-worker-config.sh \
-  /secure/temp/munge.key \
-  /secure/temp/slurm.conf.generated \
+  <gpu01本机的munge.key路径> \
+  <gpu01本机的slurm.conf.generated路径> \
   --apply
 ```
 
-验证成功后删除临时副本。
+前两个参数是位置参数，顺序不能交换；两个文件必须已经存在于 `gpu01`。如果传入不存在的 `/secure/temp/...`，脚本只会输出 usage。
 
-## 4. 基础检查
+## 5. 对比两台机器
 
-管理机执行：
+两台机器分别执行：
 
 ```bash
-munge -n | unmunge
-sinfo -N -l
-scontrol show nodes
+slurmd -V
+stat -fc %T /sys/fs/cgroup
+sha256sum \
+  /etc/slurm/slurm.conf \
+  /etc/slurm/cgroup.conf \
+  /etc/slurm/gres.conf
+sudo sha256sum /etc/munge/munge.key
 ```
 
-每台节点应显示一个 `gpu` GRES。节点为 `INVAL`、`DOWN` 时，优先对比：
+三份 Slurm 配置和 Munge key 的 checksum 必须分别一致。不要发送 Munge key 内容。
 
-- `slurmd -C` 与 `slurm.conf`；
-- 系统时间；
-- Munge 密钥 checksum、属主和权限；
-- `/etc/hosts` 和主机名；
-- 6817/6818 防火墙；
-- `gres.conf` 与 `/dev/nvidia0`。
+在 `mgmt01`：
 
-## 5. 五节点 GPU smoke test
+```bash
+scontrol ping
+sinfo -N -l
+sinfo -o '%P|%N|%T|%c|%m|%G'
+scontrol show nodes
+squeue
+```
 
-先确认五台机器都完成 `scripts/25-install-training-environment.sh`，再准备一个使用统一虚拟环境、仅输出 GPU 信息的 sbatch 脚本，然后验证：
+期望两台节点：
 
-- 每个节点单任务；
-- 5 个单 GPU 任务同时运行；
-- 任务取消；
-- 超时；
-- 节点 drain/resume；
-- Job ID 能写入平台记录。
+- 状态为 `idle`；
+- GRES 包含 `gpu:1`；
+- 地址分别是 `.202`、`.215`；
+- CPU 和内存与各自配置一致。
 
-## 6. 第一阶段训练闭环验收
+## 6. cgroup v2 和 GPU 隔离检查
 
-使用 NAS 中的一份小型 LeRobot 数据集验证：
+两台机器分别检查：
 
-1. 5 台主机都能读写 NFS；
-2. leLab 页面显示 5 台节点 GPU 状态；
-3. 手动启动一个 CUDA 进程后，该节点不再显示为空闲；
-4. leLab 从 NAS 数据集目录选择数据并提交固定模型模板；
-5. Slurm 在一台空闲节点启动统一训练环境；
-6. 页面持续显示日志、step、loss 和 checkpoint；
-7. 中断任务后，使用 NAS 上的最新 checkpoint 在任意空闲节点继续；
-8. 5 个单 GPU smoke job 能同时占用 5 台节点。
+```bash
+stat -fc %T /sys/fs/cgroup
+sudo slurmd -G
+journalctl -u slurmd -b --no-pager | \
+  grep -Ei 'cgroup|gres|gpu|error|fatal'
+```
 
-采集上传、QC、标注、DatasetVersion、精细权限和 MLflow 深度集成属于后续数据治理范围，不阻塞第一阶段训练调度平台。
+`config/slurm/cgroup.conf` 当前启用：
+
+```ini
+CgroupPlugin=autodetect
+ConstrainCores=yes
+ConstrainRAMSpace=yes
+ConstrainDevices=yes
+ConstrainSwapSpace=yes
+```
+
+`gres.conf` 使用 NVML 自动探测 `/dev/nvidia0`。如果 `slurmd -G` 报 GPU 数量或设备不匹配，先修正 NVIDIA 驱动和 `gres.conf`，不要直接把节点强制 RESUME。
+
+## 7. 两节点 GPU smoke test
+
+只在 `mgmt01` 执行：
+
+```bash
+for node in mgmt01 gpu01; do
+  echo "[$node]"
+  srun \
+    --partition=debug \
+    --nodes=1 \
+    --nodelist="$node" \
+    --ntasks=1 \
+    --cpus-per-task=1 \
+    --mem=1G \
+    --gres=gpu:1 \
+    --time=00:02:00 \
+    /opt/robot-platform/train-venv/bin/python -c \
+    'import os, socket, torch, lerobot; print("host=", socket.gethostname()); print("CUDA_VISIBLE_DEVICES=", os.environ.get("CUDA_VISIBLE_DEVICES")); print("cuda=", torch.cuda.is_available()); print("gpu=", torch.cuda.get_device_name(0)); print("lerobot=ok")'
+done
+```
+
+两个任务都必须：
+
+- 在指定节点运行；
+- 只看到分配的 GPU；
+- `cuda=True`；
+- 成功导入 LeRobot。
+
+再做并行占用测试：
+
+```bash
+srun --partition=debug --nodelist=mgmt01 --gres=gpu:1 --time=00:02:00 \
+  bash -c 'nvidia-smi -L; sleep 20' &
+srun --partition=debug --nodelist=gpu01 --gres=gpu:1 --time=00:02:00 \
+  bash -c 'nvidia-smi -L; sleep 20' &
+wait
+```
+
+## 8. 常见非正常状态
+
+| 现象 | 优先检查 |
+|---|---|
+| `DOWN` / `NOT_RESPONDING` | `slurmd` 服务、6818、防火墙、主机名、时间 |
+| `INVAL` | `slurmd -C` 与 NodeName 行、RealMemory、CPU 拓扑 |
+| `Invalid generic resource` | `sudo slurmd -G`、`gres.conf`、NVML、`/dev/nvidia0` |
+| Munge 认证失败 | key checksum、`0400 munge:munge`、时间同步 |
+| cgroup 插件加载失败 | Slurm 版本、`cgroup2fs`、`cgroup_v2.so` |
+| 作业停在 `PENDING` | `scontrol show job <id>` 的 `Reason` |
+| 远端作业提示无法进入提交目录 | 确认作业脚本和输出目录位于共享绝对路径；详见排障文档 |
+
+日志：
+
+```bash
+# mgmt01
+journalctl -u slurmctld -u slurmd -u munge -n 150 --no-pager
+
+# gpu01
+journalctl -u slurmd -u munge -n 150 --no-pager
+```
+
+## 9. Slurm 完成后的下一步
+
+只有本页所有检查通过后，才在 `mgmt01` 安装 leLab：
+
+```bash
+sudo ./scripts/15-install-lelab-platform.sh --apply
+```
+
+接着完成 [leLab SSH 探测和 API 验收](07-lelab-cluster-web.md)，最后用 NAS 中的小型 LeRobot 数据集提交第一条短任务。

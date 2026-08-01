@@ -7,6 +7,15 @@ const CHANNEL = "lelab-tabs-v1";
 const HEARTBEAT_MS = 1000;
 const PEER_TIMEOUT_MS = 3000;
 
+const createTabId = (): string => {
+  // crypto.randomUUID() is unavailable when leLab is opened over plain HTTP
+  // from another host because that is not a secure browser context.
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+};
+
 const SingleTabGuard = ({ children }: { children: ReactNode }) => {
   const [isPrimary, setIsPrimary] = useState(true);
   const peersRef = useRef<Map<string, Peer>>(new Map());
@@ -39,7 +48,7 @@ const SingleTabGuard = ({ children }: { children: ReactNode }) => {
       return;
     }
 
-    myIdRef.current = crypto.randomUUID();
+    myIdRef.current = createTabId();
     myOpenedAtRef.current = Date.now();
 
     const channel = new BroadcastChannel(CHANNEL);

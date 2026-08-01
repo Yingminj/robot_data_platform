@@ -28,7 +28,7 @@ const resolveInitialBaseUrl = (): string => {
     }
   }
 
-  return window.localStorage.getItem(STORAGE_KEY) || DEFAULT_LOCALHOST;
+  return window.localStorage.getItem(STORAGE_KEY) || window.location.origin;
 };
 
 export const ApiProvider: React.FC<{ children: ReactNode }> = ({
