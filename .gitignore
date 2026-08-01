@@ -14,6 +14,7 @@
 *.local
 *.secret
 *.key
+*.pyc
 
 # Large experiment artifacts.
 /test_lerobot/videos/
