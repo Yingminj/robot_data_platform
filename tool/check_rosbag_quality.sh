@@ -23,7 +23,7 @@ else
     echo "自动选择最新 rosbag：$BAG_PATH"
 fi
 
-LEROBOT_PYTHON="${LEROBOT_PYTHON:-/home/snorlax/.conda/envs/lerobot/bin/python}"
+LEROBOT_PYTHON="${LEROBOT_PYTHON:-/home/kewei/anaconda3/envs/lerobot/bin/python}"
 if [[ ! -x "$LEROBOT_PYTHON" ]]; then
     echo "错误：找不到 lerobot 环境的 Python：$LEROBOT_PYTHON"
     exit 2

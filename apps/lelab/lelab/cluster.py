@@ -176,17 +176,42 @@ def _probe_node(name: str, address: str, slurm_state: str) -> ClusterNode:
     node.memory_total_mb = _parse_int(fields[1])
     node.memory_free_mb = _parse_int(fields[2])
 
+    # Query GPU processes with type information (C=Compute, G=Graphics)
+    # We only care about Compute processes (training jobs), not Graphics (desktop UI)
     process_query = _probe_command(
         name,
         address,
         "nvidia-smi",
-        "--query-compute-apps=pid",
+        "--query-compute-apps=pid,process_name",
         "--format=csv,noheader,nounits",
     )
     try:
         processes = _run(process_query)
         if processes.returncode == 0:
-            node.compute_processes = len([line for line in processes.stdout.splitlines() if line.strip()])
+            # Filter out known system/graphics processes to avoid false positives
+            # Common patterns: Xorg, gnome-shell, code, rustdesk, browsers, etc.
+            graphics_patterns = {
+                "xorg", "x11", "gnome", "kde", "plasma", "compiz",
+                "rustdesk", "teamviewer", "anydesk", "parsec",
+                "code", "chrome", "firefox", "edge", "safari",
+                "clash", "v2ray", "sunlogin",
+            }
+            compute_count = 0
+            for line in processes.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                # Line format: "PID, process_name"
+                parts = line.split(",", 1)
+                if len(parts) < 2:
+                    compute_count += 1  # No name available, count it to be safe
+                    continue
+                process_name = parts[1].strip().lower()
+                # If process name contains any graphics pattern, skip it
+                if any(pattern in process_name for pattern in graphics_patterns):
+                    continue
+                compute_count += 1
+            node.compute_processes = compute_count
         else:
             node.compute_processes = 1
             node.reason = processes.stderr.strip() or "could not inspect GPU processes"

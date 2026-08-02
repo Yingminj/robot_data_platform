@@ -24,6 +24,7 @@
 artifacts/
 
 .vscode/
+CLAUDE.md
 
 dataset/
 datasets/
