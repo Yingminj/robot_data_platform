@@ -192,11 +192,12 @@ def _probe_node(name: str, address: str, slurm_state: str) -> ClusterNode:
             # Common patterns: Xorg, gnome-shell, code, rustdesk, browsers, etc.
             graphics_patterns = {
                 "xorg", "x11", "gnome", "kde", "plasma", "compiz",
-                "rustdesk", "teamviewer", "anydesk", "parsec",
+                "rustdesk", "teamviewer", "anydesk", "parsec", "awesun",
                 "code", "chrome", "firefox", "edge", "safari",
                 "clash", "v2ray", "sunlogin",
             }
             compute_count = 0
+            debug_lines = []
             for line in processes.stdout.splitlines():
                 line = line.strip()
                 if not line:
@@ -205,12 +206,17 @@ def _probe_node(name: str, address: str, slurm_state: str) -> ClusterNode:
                 parts = line.split(",", 1)
                 if len(parts) < 2:
                     compute_count += 1  # No name available, count it to be safe
+                    debug_lines.append(f"No name, counted")
                     continue
                 process_name = parts[1].strip().lower()
                 # If process name contains any graphics pattern, skip it
-                if any(pattern in process_name for pattern in graphics_patterns):
+                is_filtered = any(pattern in process_name for pattern in graphics_patterns)
+                debug_lines.append(f"{process_name[:40]} -> filtered={is_filtered}")
+                if is_filtered:
                     continue
                 compute_count += 1
+            if debug_lines:
+                logger.warning(f"[GPU-CHECK {name}] {len(debug_lines)} processes: {'; '.join(debug_lines)}")
             node.compute_processes = compute_count
         else:
             node.compute_processes = 1

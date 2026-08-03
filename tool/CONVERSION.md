@@ -122,6 +122,8 @@ conda run -n lerobot python tool/hdf5_to_lerobotv3.py \
 --action-pair-tolerance-ms    默认 5 ms
 --gripper-tolerance-ms        默认 100 ms
 --invalid-frame-policy fail   默认；可选 drop
+--action-gap-policy fail      默认；可选 hold（见下方 hold 模式说明）
+--hold-fill-leading           仅在 hold 模式有效，扩展窗口至非 joint_cmd 话题范围
 --max-decode-errors 0         默认任何必需消息解析错误都失败
 ```
 
@@ -131,7 +133,55 @@ conda run -n lerobot python tool/hdf5_to_lerobotv3.py \
 action 使用 observation 之后的第一条命令；如果某一侧命令超过一帧仍未出现，或 A/B 的时间差超过
 5 ms，该控制行默认失败。因此不会在 joint_cmd 缺失时退化为 qpos，也不会静默拿更晚控制周期的命令。
 
+### hold 模式：断档补齐
+
+**⚠️ 重要警示：hold 行表达的是机器人实际行为（松开手柄后保持当前姿态），而非遥操作意图。训练侧应按 `action_hold_mask` 过滤或降权这些行。**
+
+遥操作录制时，只有在使能状态下才发布 `/control/joint_cmd_A` 和 `/control/joint_cmd_B`（~200Hz），松开手柄后话题立即停发，导致 bag 中出现秒级断档。这些断档期间 `/joint_states` 和夹爪话题仍完整连续。
+
+使用 `--action-gap-policy hold` 可以将缺失 joint_cmd 的控制行用**下一 tick 的插值 qpos** 补齐，而非直接拒绝整个 episode：
+
+```bash
+conda run -n lerobot python tool/rosbag2_to_lerobotv3.py \
+  --input /path/to/rosbag \
+  --output /path/to/dataset \
+  --repo-id local/my_dataset \
+  --task "pick object" \
+  --fps 30 \
+  --action-gap-policy hold
+```
+
+**hold 模式语义**：
+- 每个网格 tick 仍先按严格规则找观测后第一条 cmd_A、cmd_B（容差不变）
+- 双臂都找到真实命令：保持现状，且 A/B 配对偏差仍要求 ≤5ms
+- 仅一侧找到：该侧用真实指令；缺失侧该臂 7 维 action 用 `arm_qpos[k+1]` 补齐（最后一行用 `arm_qpos[k]`）
+- 双臂都找不到：双臂均按上述规则补齐
+- 夹爪 action 不补齐，仍走现有逻辑与 100ms 容差
+- 图像、joint_state、观测夹爪等其他 valid_parts 全部保持严格检查——这些原因导致的无效行不受 hold 影响，仍按 `--invalid-frame-policy` 处理
+- 整集真实指令行数 == 0 时抛异常拒绝（避免纯机械重放数据）
+
+**输出与记账**：
+- `timestamps/action_hold_mask`（bool 数组）：任一臂被补齐即为 `True`
+- `audit` 新增字段：
+  - `action_gap_policy`: `"hold"`
+  - `hold_rows`: 总补齐行数
+  - `hold_fraction`: 补齐行占比
+  - `hold_rows_by_arm`: `{"A": ..., "B": ..., "both": ...}` 分臂统计
+  - `real_command_rows`: 至少一臂有真实指令的行数
+  - `hold_segments`: 每段连续断档的起止时间（秒）、行数、该段 14 维关节的最大单步漂移（rad）
+
+**`--hold-fill-leading` 参数**：
+- 默认情况下，窗口计算仍受所有话题（包括 joint_cmd_A/B）首末消息限制
+- 打开此参数后，窗口计算时忽略 joint_cmd 时间范围，仅使用 joint_states、gripper、image 等话题窗口
+- 允许补齐前导断档（录制开始时还未按下使能）和尾随断档（录制结束前已松开使能）
+
+**训练侧使用建议**：
+- 读取 `timestamps/action_hold_mask`，过滤掉 `True` 的行，或对这些行使用较低的损失权重
+- hold 行的 action 反映机器人实际执行的"保持"行为，但不包含遥操作者的新意图
+- 如果训练目标是模仿遥操作策略而非机器人轨迹回放，应排除 hold 行
+
 相机和深度 topic 可重复配置：
+
 
 ```bash
 --camera top=/my/top/image --camera wrist=/my/wrist/image

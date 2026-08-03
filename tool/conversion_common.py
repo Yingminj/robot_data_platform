@@ -74,6 +74,8 @@ class AlignmentConfig:
     invalid_frame_policy: str = "fail"
     include_depth: bool = False
     max_decode_errors: int = 0
+    action_gap_policy: str = "fail"
+    hold_fill_leading: bool = False
 
     def __post_init__(self) -> None:
         if self.fps <= 0:
@@ -82,6 +84,8 @@ class AlignmentConfig:
             raise ValueError("mode must be capture or lerobot-loop")
         if self.invalid_frame_policy not in {"fail", "drop"}:
             raise ValueError("invalid_frame_policy must be fail or drop")
+        if self.action_gap_policy not in {"fail", "hold"}:
+            raise ValueError("action_gap_policy must be fail or hold")
         if self.joint_state_order not in {"named", "first14"}:
             raise ValueError("joint_state_order must be named or first14")
         if bool(self.image_height) != bool(self.image_width):
@@ -362,6 +366,60 @@ def _stats_ms(values_ns: np.ndarray) -> dict[str, float | int | None]:
     }
 
 
+def _compute_hold_segments(
+    hold_mask: np.ndarray, grid_ns: np.ndarray, arm_qpos: np.ndarray, fps: int
+) -> list[dict[str, Any]]:
+    """Compute contiguous hold segments with drift metrics."""
+    if not hold_mask.any():
+        return []
+
+    segments: list[dict[str, Any]] = []
+    in_segment = False
+    segment_start_idx = 0
+
+    for i in range(len(hold_mask)):
+        if hold_mask[i] and not in_segment:
+            in_segment = True
+            segment_start_idx = i
+        elif not hold_mask[i] and in_segment:
+            # Segment ended at i-1
+            segment_end_idx = i - 1
+            segments.append(_build_segment_info(segment_start_idx, segment_end_idx, grid_ns, arm_qpos, fps))
+            in_segment = False
+
+    # Handle segment extending to the end
+    if in_segment:
+        segment_end_idx = len(hold_mask) - 1
+        segments.append(_build_segment_info(segment_start_idx, segment_end_idx, grid_ns, arm_qpos, fps))
+
+    return segments
+
+
+def _build_segment_info(
+    start_idx: int, end_idx: int, grid_ns: np.ndarray, arm_qpos: np.ndarray, fps: int
+) -> dict[str, Any]:
+    """Build segment info with drift metrics."""
+    segment_rows = end_idx - start_idx + 1
+    start_time_s = float(grid_ns[start_idx]) / 1e9
+    end_time_s = float(grid_ns[end_idx]) / 1e9
+
+    # Compute max single-step joint drift in this segment
+    if segment_rows > 1:
+        segment_qpos = arm_qpos[start_idx : end_idx + 1]
+        diffs = np.abs(segment_qpos[1:] - segment_qpos[:-1])
+        max_joint_drift_rad = float(np.max(diffs))
+    else:
+        max_joint_drift_rad = 0.0
+
+    return {
+        "start_time_s": start_time_s,
+        "end_time_s": end_time_s,
+        "duration_s": end_time_s - start_time_s,
+        "rows": segment_rows,
+        "max_joint_drift_rad": max_joint_drift_rad,
+    }
+
+
 @dataclass
 class _RawBag:
     bag_dir: Path
@@ -637,17 +695,28 @@ def align_rosbag(
 ) -> AlignedEpisode:
     """Convert one rosbag into strict, fixed-rate LeRobot-style rows."""
     raw = _scan_bag(bag_dir.expanduser().resolve(), topics, cfg)
-    required_times = [
-        raw.joint_t,
-        raw.cmd_a_t,
-        raw.cmd_b_t,
-        raw.grip_l_t,
-        raw.grip_r_t,
-        *raw.image_t.values(),
-        *raw.depth_t.values(),
-    ]
-    start_ns = max(int(values[0]) for values in required_times)
-    end_ns = min(int(values[-1]) for values in required_times)
+
+    # Window computation: exclude joint_cmd topics when hold_fill_leading is enabled
+    if cfg.action_gap_policy == "hold" and cfg.hold_fill_leading:
+        window_times = [
+            raw.joint_t,
+            raw.grip_l_t,
+            raw.grip_r_t,
+            *raw.image_t.values(),
+            *raw.depth_t.values(),
+        ]
+    else:
+        window_times = [
+            raw.joint_t,
+            raw.cmd_a_t,
+            raw.cmd_b_t,
+            raw.grip_l_t,
+            raw.grip_r_t,
+            *raw.image_t.values(),
+            *raw.depth_t.values(),
+        ]
+    start_ns = max(int(values[0]) for values in window_times)
+    end_ns = min(int(values[-1]) for values in window_times)
     if end_ns <= start_ns:
         raise ConversionError("Required topic time ranges do not overlap")
     frame_count = int(math.floor((end_ns - start_ns) * cfg.fps / 1e9)) + 1
@@ -722,9 +791,6 @@ def align_rosbag(
     cmd_b_valid &= cmd_b_lead <= action_tol
     command_skew = np.abs(raw.cmd_a_t[cmd_a_idx] - raw.cmd_b_t[cmd_b_idx])
     pair_valid = command_skew <= pair_tol
-    valid_parts["joint_cmd_A"] = cmd_a_valid
-    valid_parts["joint_cmd_B"] = cmd_b_valid
-    valid_parts["joint_cmd_pair"] = pair_valid
 
     # Gripper topics are slower than arm commands and represent a held endpoint
     # value.  Use the latest value available when each teleop arm command is made.
@@ -736,8 +802,42 @@ def align_rosbag(
     )
     action_grip_l_valid &= action_grip_l_age <= gripper_tol
     action_grip_r_valid &= action_grip_r_age <= gripper_tol
-    valid_parts["action_gripper_L"] = action_grip_l_valid
-    valid_parts["action_gripper_R"] = action_grip_r_valid
+
+    # Hold mode: action gaps are filled with next-tick qpos instead of failing
+    action_hold_mask: np.ndarray | None = None
+    hold_audit: dict[str, Any] = {}
+    if cfg.action_gap_policy == "hold":
+        # Determine which rows need hold fill: either arm invalid OR pair invalid
+        cmd_a_real = cmd_a_valid & pair_valid
+        cmd_b_real = cmd_b_valid & pair_valid
+        action_hold_mask = ~(cmd_a_real & cmd_b_real)
+
+        # Count real teleop command rows (at least one arm has real command)
+        real_cmd_rows = int((cmd_a_real | cmd_b_real).sum())
+        if real_cmd_rows == 0:
+            raise ConversionError("episode contains no real teleop command rows")
+
+        hold_audit = {
+            "hold_rows": int(action_hold_mask.sum()),
+            "hold_fraction": float(action_hold_mask.sum() / frame_count),
+            "hold_rows_by_arm": {
+                "A": int((~cmd_a_real).sum()),
+                "B": int((~cmd_b_real).sum()),
+                "both": int((~cmd_a_real & ~cmd_b_real).sum()),
+            },
+            "real_command_rows": real_cmd_rows,
+        }
+
+        # Do not add joint_cmd checks to valid_parts in hold mode
+        valid_parts["action_gripper_L"] = action_grip_l_valid
+        valid_parts["action_gripper_R"] = action_grip_r_valid
+    else:
+        # Fail mode: original strict checking
+        valid_parts["joint_cmd_A"] = cmd_a_valid
+        valid_parts["joint_cmd_B"] = cmd_b_valid
+        valid_parts["joint_cmd_pair"] = pair_valid
+        valid_parts["action_gripper_L"] = action_grip_l_valid
+        valid_parts["action_gripper_R"] = action_grip_r_valid
 
     valid_mask = np.ones(frame_count, dtype=bool)
     for part in valid_parts.values():
@@ -771,19 +871,51 @@ def align_rosbag(
     action_grip_r_age = keep(action_grip_r_age)
     image_indices = {name: keep(indices) for name, indices in image_indices.items()}
     depth_indices = {name: keep(indices) for name, indices in depth_indices.items()}
+    if action_hold_mask is not None:
+        action_hold_mask = keep(action_hold_mask)
 
     obs_grip_l = raw.grip_l[obs_grip_l_idx, None]
     obs_grip_r = raw.grip_r[obs_grip_r_idx, None]
     qpos = np.concatenate([arm_qpos, obs_grip_l, obs_grip_r], axis=1).astype(np.float32)
-    action = np.concatenate(
-        [
-            raw.cmd_a[cmd_a_idx],
-            raw.cmd_b[cmd_b_idx],
-            raw.grip_l[action_grip_l_idx, None],
-            raw.grip_r[action_grip_r_idx, None],
-        ],
-        axis=1,
-    ).astype(np.float32)
+
+    # Build action: in hold mode, use next-tick qpos for missing commands
+    if cfg.action_gap_policy == "hold":
+        cmd_a_real = keep(cmd_a_valid & pair_valid)
+        cmd_b_real = keep(cmd_b_valid & pair_valid)
+
+        # Prepare next-tick arm_qpos for hold fill
+        arm_qpos_next = np.empty_like(arm_qpos)
+        arm_qpos_next[:-1] = arm_qpos[1:]
+        arm_qpos_next[-1] = arm_qpos[-1]  # Last row copies itself
+
+        # Build action with conditional selection
+        action_left = np.where(cmd_a_real[:, None], raw.cmd_a[cmd_a_idx], arm_qpos_next[:, :7])
+        action_right = np.where(cmd_b_real[:, None], raw.cmd_b[cmd_b_idx], arm_qpos_next[:, 7:14])
+
+        action = np.concatenate(
+            [
+                action_left,
+                action_right,
+                raw.grip_l[action_grip_l_idx, None],
+                raw.grip_r[action_grip_r_idx, None],
+            ],
+            axis=1,
+        ).astype(np.float32)
+
+        # Compute hold segments for audit
+        hold_segments = _compute_hold_segments(action_hold_mask, grid_ns, arm_qpos, cfg.fps)
+        hold_audit["hold_segments"] = hold_segments
+    else:
+        # Fail mode: use real commands only
+        action = np.concatenate(
+            [
+                raw.cmd_a[cmd_a_idx],
+                raw.cmd_b[cmd_b_idx],
+                raw.grip_l[action_grip_l_idx, None],
+                raw.grip_r[action_grip_r_idx, None],
+            ],
+            axis=1,
+        ).astype(np.float32)
     if np.array_equal(qpos, action):
         raise ConversionError("Entire action array equals observation state; refusing unsafe dataset")
 
@@ -807,6 +939,8 @@ def align_rosbag(
         "action_gripper_L_ns": raw.grip_l_t[action_grip_l_idx],
         "action_gripper_R_ns": raw.grip_r_t[action_grip_r_idx],
     }
+    if action_hold_mask is not None:
+        timestamps["action_hold_mask"] = action_hold_mask
     for name, indices in image_indices.items():
         timestamps[f"image_{name}_ns"] = raw.image_t[name][indices]
     for name, indices in depth_indices.items():
@@ -816,6 +950,7 @@ def align_rosbag(
         "schema_version": "aligned-control-rows-v1",
         "source_bag": str(raw.bag_dir),
         "alignment_mode": cfg.mode,
+        "action_gap_policy": cfg.action_gap_policy,
         "fps": cfg.fps,
         "candidate_frames": frame_count,
         "output_frames": int(qpos.shape[0]),
@@ -845,6 +980,7 @@ def align_rosbag(
                 for name, offsets in depth_offsets.items()
             },
         },
+        **hold_audit,
     }
     return AlignedEpisode(
         source=str(raw.bag_dir),

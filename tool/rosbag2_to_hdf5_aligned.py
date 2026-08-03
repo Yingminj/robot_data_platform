@@ -49,6 +49,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--action-pair-tolerance-ms", type=float, default=5.0)
     parser.add_argument("--gripper-tolerance-ms", type=float, default=100.0)
     parser.add_argument("--invalid-frame-policy", choices=("fail", "drop"), default="fail")
+    parser.add_argument(
+        "--action-gap-policy",
+        choices=("fail", "hold"),
+        default="fail",
+        help="fail=拒绝缺失 joint_cmd 的行（默认）；hold=用下一 tick 的 qpos 补齐",
+    )
+    parser.add_argument(
+        "--hold-fill-leading",
+        action="store_true",
+        help="在 hold 模式下，窗口计算时忽略 joint_cmd 时间范围，允许补齐前导/尾随断档",
+    )
     parser.add_argument("--max-decode-errors", type=int, default=0)
     parser.add_argument("--image-height", type=int, default=0, help="0 表示保留原高度")
     parser.add_argument("--image-width", type=int, default=0, help="0 表示保留原宽度")
@@ -104,6 +115,8 @@ def main() -> int:
             invalid_frame_policy=args.invalid_frame_policy,
             include_depth=args.include_depth,
             max_decode_errors=args.max_decode_errors,
+            action_gap_policy=args.action_gap_policy,
+            hold_fill_leading=args.hold_fill_leading,
         )
         bags = sort_and_limit(discover_rosbags(args.input, args.recursive), args.sort_by, args.limit)
         if not bags:
