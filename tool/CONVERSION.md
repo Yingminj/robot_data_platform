@@ -36,6 +36,9 @@ MCAP 自带 schema；**rosbag2 sqlite3（format version 5）不带**，`.db3` �
 | `marvin-dexhand-head` | 同上 | `sensor_msgs/Image` | 1（仅 `/camera/camera`） | `dexhand` × 2 | 54 |
 | `tj-dexhand`（默认） | `/tj/joint_states`, `/tj/control/joint_cmd_A\|B` | `CompressedImage`（JPEG） | 3（`/head_camera`, `/wrist_*_camera`） | `dexhand` × 2 | 54 |
 
+另有 `tool/profiles/marvin-gripper-quadtile.json`（非内置，按路径引用）：手臂/夹爪与 `marvin-gripper`
+相同，但三路相机合成在单个 `/quad_tile/compressed` 话题里，靠 `camera_tiles` 拆分，见下文。
+
 相机数量不同必须用不同 profile：LeRobot 数据集要求每个 episode 暴露相同的特征集，
 所以"只有头部相机"的录制和"三相机"的录制是两个数据集，不能混在一起转换。
 
@@ -72,6 +75,52 @@ MCAP 自带 schema；**rosbag2 sqlite3（format version 5）不带**，`.db3` �
 
 **没有 `state_topic` 时，观测会退化为回显指令**，此时该部分观测就是动作的副本，策略会学到恒等映射。
 转换审计里的 `end_effector_state_source` 会把这种情况标成 `command_echo`，请优先在录制端补上状态话题。
+
+### 拼接图（mosaic）拆分：`camera_tiles`
+
+新版录制把多路相机合成到**单个** `/quad_tile/compressed` 话题里，而不是每路相机一个话题。
+此时多个相机共用同一个 topic，各自用 `camera_tiles` 声明自己占据拼接图的哪一块：
+
+```json
+"cameras": {
+  "top":     "/quad_tile/compressed",
+  "wrist_L": "/quad_tile/compressed",
+  "wrist_R": "/quad_tile/compressed"
+},
+"camera_tiles": {
+  "top":     {"left": 0.0, "top": 0.0,      "right": 1.0, "bottom": 0.666666, "width": 640, "height": 480},
+  "wrist_L": {"left": 0.0, "top": 0.666666, "right": 0.5, "bottom": 1.0,      "width": 640, "height": 480},
+  "wrist_R": {"left": 0.5, "top": 0.666666, "right": 1.0, "bottom": 1.0,      "width": 640, "height": 480}
+}
+```
+
+边界是**比例**而不是像素，和部署端的拆分函数
+（`Apex_Deploy_new/robot_node/vlahost/vlahost/lebot_client.py:split_hero3_image`）保持一致：
+拼接图在送到消费者之前可能被整体缩放，比例写法能扛住这种缩放。`width`/`height` 是裁剪后
+resize 的目标尺寸，缩放用 `INTER_LINEAR`，与部署端 `_resize_camera` 相同，**保证训练帧和推理
+帧经过同一条滤波路径**。
+
+`marvin-gripper-quadtile`（`tool/profiles/marvin-gripper-quadtile.json`）就是这样一个 profile，
+对应 realsense 节点的 hero3 布局（`components/realsense/config/realsense.yaml`：
+`top_count: 1`, `top_height: 960`, 输出 1280x1440）：
+
+```text
+[            head  1280x960            ]   <- 原生 640x480 的 2 倍放大
+[ wrist_left 640x480 | wrist_right 640x480 ]   <- 原生尺寸
+```
+
+注意**头部相机在拼接图里是 2 倍放大的**，不是 640x480。按 640x480 直接切三块会切出头部画面的
+四分之一角落，得到完全错误的图像。两路腕部相机才是原生尺寸，对它们而言 resize 是空操作。
+
+拼接图每帧只解码一次，再按各相机的 tile 裁剪，所以三个相机不会带来三倍解码开销。
+共用 topic 的相机如果没有全部声明 `camera_tiles`，profile 会直接报错——否则它们会是同一张图。
+
+**能录per-camera话题就不要录拼接图**：realsense 节点其实已经在发
+`/head_camera|wrist_left_camera|wrist_right_camera/camera/color/image_raw/compressed`
+（`publish.per_camera_compressed: true`），只是在
+`UI_node/.../config/recording_topics_gripper.yaml` 里被注释掉了。per-camera 话题是原生分辨率、
+每路相机独立的采集时间戳；拼接图把三路强行压到一个 30 Hz 的合成时间戳上，腕部相机原本 60 fps
+的独立性会**永久丢失**，而且 JPEG 是在放大之后才编码的，头部画质也更差。
 
 ## 对齐模式
 
@@ -117,6 +166,50 @@ LeRobot 0.6 的官方 `record_loop()` 顺序是 `robot.get_observation()` → `t
 ⚠️ 某条手臂**全程**被填充时（例如实测样例 bag 的左臂 637/637 行），它的动作列对策略而言
 就是恒等映射，只能表达"保持当前位姿"。确认该手臂确实是停放状态再用于训练——
 实测样例中左臂在整个窗口内的关节变化仅 0.0056 rad，属于传感器噪声量级。
+
+### 整段缺失的话题：`--missing-topic-policy`
+
+`--action-gap-policy` 处理的是窗口**内部**的断档。但同一台机器不同批次的录制，
+经常会有 profile 声明、录制里却**一条消息都没有**的话题：某次任务只用右手，
+`/control/gripperValueL` 就整段为空；某代录制根本没有 `/gripper/feedback_*`。
+为每种组合单独写一个 profile 会让 `state_dim` 在批次之间漂移——而 LeRobot 数据集
+要求所有 episode 的特征集完全一致，schema 一漂移就只能拆成多个数据集。
+
+因此话题按"缺了能不能补"分三类：
+
+| 类别 | 话题 | 缺失时 |
+|---|---|---|
+| 必需 | `joint_states`、所有相机 | 一律拒绝——没有诚实的替代品 |
+| 可重建 | `joint_cmd_*`、末端执行器指令 | `--missing-topic-policy fill` 时由实测状态重建 |
+| 可选 | 末端执行器 `state_topic`（实测反馈） | 自动降级为 command echo，不影响转换 |
+
+`--missing-topic-policy` 取值：
+
+| 取值 | 行为 |
+|---|---|
+| `fail`（默认） | 任何可重建话题为空/缺失都拒绝该 episode |
+| `fill` | 由实测状态重建，必须同时用 `--action-gap-policy joint-state-fill` |
+
+`fill` 的重建来源与 `joint-state-fill` 完全同源，只是把"某一段"扩展成"整集"：
+
+- 手臂 `joint_cmd_X` 整段为空 → 用该手臂自己的 `joint_states` 列填充全部行，
+  计入 `audit.hold.joint_state_fill_rows`
+- 末端执行器指令话题整段为空 → 用它自己的实测 `state_topic` 填充，
+  记为 `audit.end_effector_action_source = "state_fill"`
+- 末端执行器指令与实测**都**没有 → 仍然拒绝，没有可用来源
+
+`audit.missing_topics` 逐条记录缺了什么、被什么替代：
+
+```json
+"missing_topics": {
+  "/control/gripperValueR": {"status": "empty",  "filled_from": "/gripper/feedback_R (measured position)"},
+  "/gripper/feedback_L":    {"status": "absent", "filled_from": "/control/gripperValueL (command echo)"}
+}
+```
+
+⚠️ 与 `joint-state-fill` 相同的告诫：**重建出来的动作列是观测的恒等副本**，
+只能表达"保持当前位姿"。用于训练前请确认该自由度在整集内确实是停放状态
+（`check_rosbag_quality.py` 会给出该话题的实际活动区间）。
 
 `--grid-anchor` 三种取值：
 
@@ -172,7 +265,10 @@ conda run -n lerobot python tool/rosbag2_to_lerobotv3.py \
 ```
 
 旧版 `.db3`（`marvin-gripper` 一代）需要加 `--action-gap-policy joint-state-fill`，
-因为这批录制里两条手臂是**交替**遥操作的，某条手臂会整段没有 `joint_cmd`：
+因为这批录制里两条手臂是**交替**遥操作的，某条手臂会整段没有 `joint_cmd`。
+如果这批数据里还有整段为空的指令话题（单手任务、缺 `gripperValue*`），
+再加上 `--missing-topic-policy fill`，一个 profile 就能覆盖整个语料，
+不必按批次拆 profile：
 
 ```bash
 conda run -n lerobot python tool/rosbag2_to_lerobotv3.py \
@@ -180,8 +276,13 @@ conda run -n lerobot python tool/rosbag2_to_lerobotv3.py \
   --output /path/to/my_dataset \
   --profile marvin-gripper \
   --action-gap-policy joint-state-fill \
+  --missing-topic-policy fill \
+  --end-effector-tolerance-ms 300 \
   --fps 30 --on-error skip
 ```
+
+`--end-effector-tolerance-ms` 需要放宽是因为夹爪指令值不变时发布端会停发：
+实测 `/control/gripperValueL` 名义 20 Hz，夹爪停在闭合位时出现过 250 ms 的间隔。
 
 **训练数据建议直接走这条路径，不要经过 HDF5。** 同一段数据实测：
 gzip HDF5 273 MB，LeRobot v3（AV1 CRF 0 无损）7.6 MB，差 36 倍。
@@ -258,6 +359,7 @@ CRF 0 消除量化损失，但 `yuv420p` 仍有色度下采样；要求 RGB 逐�
 --end-effector-tolerance-ms   默认 100 ms
 --invalid-frame-policy fail   默认；可选 drop
 --action-gap-policy hold-last-command   默认；可选 joint-state-fill / fail
+--missing-topic-policy fail   默认；可选 fill（需配合 joint-state-fill）
 --max-tick-rate-deviation 0.1 anchor-camera-ticks 下 tick 频率与 --fps 的最大相对偏差
 --max-hold-fraction / --max-hold-run-s  hold 过多时拒绝 episode
 --max-decode-errors 0         默认任何必需消息解析错误都失败
@@ -280,7 +382,9 @@ CRF 0 消除量化损失，但 `yuv420p` 仍有色度下采样；要求 RGB 逐�
 | `window` | bag 时长、命令跨度、转换跨度、命令覆盖率、遥操作起点偏移 |
 | `hold` | hold 行数/占比/最长连续时长/分段 |
 | `unique_ratio` | 每路图像与命令被选中的去重率；明显低于 1 说明 `--fps` 高于该流真实频率 |
+| `missing_topics` | profile 声明但录制未提供的话题，及其重建来源 |
 | `end_effector_state_source` | `measured` 或 `command_echo` |
+| `end_effector_action_source` | `command` 或 `state_fill`（指令话题整段为空，由实测状态重建） |
 | `image_formats` | 每路相机识别到的 `raw_image` / `compressed_image` |
 | `tolerant_cdr_parses` | 需要容错 CDR 解析的消息数（见下） |
 | `metrics_ms` | 命令延迟、A/B 偏差、末端执行器年龄、图像陈旧度的 mean/p50/p95/max |

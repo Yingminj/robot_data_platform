@@ -1,0 +1,77 @@
+{
+  "name": "marvin-gripper-quadtile",
+  "robot_type": "marvin",
+  "_comment": [
+    "Recordings whose cameras arrive pre-stitched on a single /quad_tile/compressed",
+    "topic instead of one topic per camera. The mosaic is the 'hero3' layout built by",
+    "Apex_Deploy_new/components/realsense (mosaic.cpp ComputeHeroLayout, configured by",
+    "components/realsense/config/realsense.yaml: top_count 1, top_height 960, output",
+    "1280x1440):",
+    "",
+    "    [            head  1280x960            ]   <- 2x upscale of native 640x480",
+    "    [ wrist_left 640x480 | wrist_right 640x480 ]   <- native",
+    "",
+    "The tiles below reproduce vlahost/lebot_client.py:split_hero3_image exactly, so",
+    "training frames match what the policy is fed at inference time. Bounds are",
+    "fractional for the same reason that function uses ratios: the mosaic may be",
+    "rescaled before a consumer sees it.",
+    "",
+    "Prefer recording the per-camera topics when you can -- the realsense node already",
+    "publishes them (publish.per_camera_compressed: true); they are merely commented",
+    "out of UI_node/.../config/recording_topics_gripper.yaml. They carry native",
+    "resolution and independent per-camera capture stamps, both of which the mosaic",
+    "destroys."
+  ],
+  "arm": {
+    "joint_states_topic": "/joint_states",
+    "joint_names": [
+      "Joint1_L", "Joint2_L", "Joint3_L", "Joint4_L", "Joint5_L", "Joint6_L", "Joint7_L",
+      "Joint1_R", "Joint2_R", "Joint3_R", "Joint4_R", "Joint5_R", "Joint6_R", "Joint7_R"
+    ],
+    "command_topics": ["/control/joint_cmd_A", "/control/joint_cmd_B"],
+    "command_dim": 7
+  },
+  "end_effectors": [
+    {
+      "name": "L",
+      "kind": "gripper",
+      "dim": 1,
+      "command_topic": "/control/gripperValueL",
+      "command_kind": "float32",
+      "state_topic": null
+    },
+    {
+      "name": "R",
+      "kind": "gripper",
+      "dim": 1,
+      "command_topic": "/control/gripperValueR",
+      "command_kind": "float32",
+      "state_topic": null
+    }
+  ],
+  "cameras": {
+    "top": "/quad_tile/compressed",
+    "wrist_L": "/quad_tile/compressed",
+    "wrist_R": "/quad_tile/compressed"
+  },
+  "camera_tiles": {
+    "top": {
+      "left": 0.0, "top": 0.0, "right": 1.0, "bottom": 0.6666666666666666,
+      "width": 640, "height": 480
+    },
+    "wrist_L": {
+      "left": 0.0, "top": 0.6666666666666666, "right": 0.5, "bottom": 1.0,
+      "width": 640, "height": 480
+    },
+    "wrist_R": {
+      "left": 0.5, "top": 0.6666666666666666, "right": 1.0, "bottom": 1.0,
+      "width": 640, "height": 480
+    }
+  },
+  "depths": {},
+  "anchor_camera": "top",
+  "message_definitions": {
+    "marvin_msgs/msg/Jointcmd": "std_msgs/Header header\nfloat64[7] positions\n",
+    "marvin_msgs/msg/JointcmdArm": "std_msgs/Header header\nfloat64[7] positions\n"
+  }
+}

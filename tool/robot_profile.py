@@ -39,7 +39,8 @@ END_EFFECTOR_KINDS = (GRIPPER, DEXHAND)
 
 FLOAT32 = "float32"
 JOINTSTATE = "jointstate"
-PAYLOAD_KINDS = (FLOAT32, JOINTSTATE)
+FLOAT32MULTIARRAY = "float32multiarray"
+PAYLOAD_KINDS = (FLOAT32, JOINTSTATE, FLOAT32MULTIARRAY)
 
 
 @dataclass(frozen=True)
@@ -90,6 +91,12 @@ class EndEffectorSpec:
     state_topic: str | None = None
     state_kind: str = JOINTSTATE
     joint_names: tuple[str, ...] = ()
+    # Which components of a ``float32multiarray`` payload carry the effector's
+    # position, in output order.  Gripper feedback topics publish a flat vector
+    # (position, velocity, current, two temperatures ...) whose meaning is
+    # positional, so the profile names the indices instead of guessing.
+    state_indices: tuple[int, ...] = ()
+    command_indices: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -110,6 +117,24 @@ class EndEffectorSpec:
             raise ProfileError(
                 f"end effector {self.name}: {len(self.joint_names)} joint names for dim {self.dim}"
             )
+        for label, kind, indices in (
+            ("state", self.state_kind if self.state_topic else None, self.state_indices),
+            ("command", self.command_kind, self.command_indices),
+        ):
+            if kind == FLOAT32MULTIARRAY:
+                if len(indices) != self.dim:
+                    raise ProfileError(
+                        f"end effector {self.name}: {label}_kind float32multiarray needs "
+                        f"{self.dim} {label}_indices, got {len(indices)}"
+                    )
+                if any(index < 0 for index in indices):
+                    raise ProfileError(
+                        f"end effector {self.name}: {label}_indices must be non-negative"
+                    )
+            elif indices:
+                raise ProfileError(
+                    f"end effector {self.name}: {label}_indices only apply to float32multiarray"
+                )
 
     @property
     def has_measured_state(self) -> bool:
@@ -125,6 +150,74 @@ class EndEffectorSpec:
 
 
 @dataclass(frozen=True)
+class CameraTile:
+    """One camera carved out of a stitched mosaic topic.
+
+    Newer recordings publish a single composited image (``/quad_tile/compressed``)
+    instead of one topic per camera, so the cameras have to be recovered by
+    cropping.  Bounds are *fractions* of the mosaic rather than pixel counts,
+    which is how the deployment-side splitter does it
+    (``vlahost/lebot_client.py:split_hero3_image``): the mosaic may be rescaled
+    before it reaches a consumer, and a fractional spec survives that.
+
+    ``width``/``height`` give the size each crop is resized to.  For the hero
+    layout the wrist crops are already at their native size and the resize is a
+    no-op, while the head crop is 2x oversized in the mosaic and is genuinely
+    scaled back down.
+    """
+
+    left: float = 0.0
+    top: float = 0.0
+    right: float = 1.0
+    bottom: float = 1.0
+    width: int = 0
+    height: int = 0
+
+    def __post_init__(self) -> None:
+        for field, value in (
+            ("left", self.left),
+            ("top", self.top),
+            ("right", self.right),
+            ("bottom", self.bottom),
+        ):
+            if not 0.0 <= value <= 1.0:
+                raise ProfileError(f"camera tile {field} must be within [0, 1], got {value}")
+        if self.left >= self.right:
+            raise ProfileError(f"camera tile left {self.left} must be < right {self.right}")
+        if self.top >= self.bottom:
+            raise ProfileError(f"camera tile top {self.top} must be < bottom {self.bottom}")
+        if bool(self.width) != bool(self.height):
+            raise ProfileError("camera tile width and height must both be zero or both be positive")
+        if self.width < 0 or self.height < 0:
+            raise ProfileError("camera tile width and height must not be negative")
+
+    def pixel_bounds(self, shape: tuple[int, ...]) -> tuple[int, int, int, int]:
+        """Resolve the fractional crop against a concrete ``(height, width)``."""
+        height, width = shape[0], shape[1]
+        x0, x1 = int(round(self.left * width)), int(round(self.right * width))
+        y0, y1 = int(round(self.top * height)), int(round(self.bottom * height))
+        # Clamp so a degenerate mosaic yields an empty-but-valid slice error
+        # rather than a silently transposed one.
+        x0, x1 = max(0, min(x0, width - 1)), max(1, min(x1, width))
+        y0, y1 = max(0, min(y0, height - 1)), max(1, min(y1, height))
+        if x1 <= x0 or y1 <= y0:
+            raise ProfileError(f"camera tile resolves to an empty crop on a {width}x{height} mosaic")
+        return x0, y0, x1, y1
+
+    def apply(self, image: Any) -> Any:
+        """Crop ``image`` and resize the result to the declared output size."""
+        x0, y0, x1, y1 = self.pixel_bounds(image.shape)
+        crop = image[y0:y1, x0:x1]
+        if not self.width or crop.shape[:2] == (self.height, self.width):
+            return crop
+        import cv2
+
+        # INTER_LINEAR mirrors the deployment splitter's `_resize_camera`, so
+        # training frames and live inference frames go through the same filter.
+        return cv2.resize(crop, (self.width, self.height), interpolation=cv2.INTER_LINEAR)
+
+
+@dataclass(frozen=True)
 class RobotProfile:
     """Complete description of one recording setup."""
 
@@ -135,6 +228,10 @@ class RobotProfile:
     cameras: dict[str, str] = None  # type: ignore[assignment]
     depths: dict[str, str] = None  # type: ignore[assignment]
     anchor_camera: str | None = None
+    # ``camera name -> CameraTile`` for cameras that share a stitched topic.
+    # Empty for the one-topic-per-camera setups, where each camera is its own
+    # whole frame.
+    camera_tiles: dict[str, CameraTile] = None  # type: ignore[assignment]
     # ``typename -> .msg definition text`` for message types the bag does not
     # carry itself.  MCAP embeds its schemas, but rosbag2 sqlite3 (format
     # version 5) stores only type *names*, so custom types must be supplied
@@ -144,9 +241,31 @@ class RobotProfile:
     def __post_init__(self) -> None:
         object.__setattr__(self, "cameras", dict(self.cameras or {}))
         object.__setattr__(self, "depths", dict(self.depths or {}))
+        object.__setattr__(self, "camera_tiles", dict(self.camera_tiles or {}))
         object.__setattr__(self, "message_definitions", dict(self.message_definitions or {}))
         if not self.cameras:
             raise ProfileError(f"profile {self.name}: at least one camera is required")
+        unknown_tiles = set(self.camera_tiles) - set(self.cameras)
+        if unknown_tiles:
+            raise ProfileError(
+                f"profile {self.name}: camera_tiles for undeclared cameras {sorted(unknown_tiles)}"
+            )
+        # Several cameras may share one topic only when each says which slice of
+        # it it owns; otherwise they would silently be the same image.
+        shared: dict[str, list[str]] = {}
+        for camera, topic in self.cameras.items():
+            shared.setdefault(topic, []).append(camera)
+        for topic, names in shared.items():
+            if len(names) > 1 and not set(names) <= set(self.camera_tiles):
+                raise ProfileError(
+                    f"profile {self.name}: cameras {sorted(names)} share topic {topic} "
+                    "but not all of them declare a camera_tiles entry"
+                )
+        for camera, topic in self.depths.items():
+            if camera in self.camera_tiles:
+                raise ProfileError(
+                    f"profile {self.name}: camera {camera} is a mosaic tile and cannot carry depth"
+                )
         names = [effector.name for effector in self.end_effectors]
         if len(set(names)) != len(names):
             raise ProfileError(f"profile {self.name}: duplicate end effector names {names}")
@@ -205,6 +324,32 @@ class RobotProfile:
                 topics.add(effector.state_topic)
         return topics
 
+    @property
+    def essential_topics(self) -> set[str]:
+        """Topics with no honest substitute if the recording lacks them.
+
+        Everything else in :attr:`required_topics` -- the arm command topics and
+        the end-effector streams -- can be reconstructed from measured state
+        when the recording leaves it silent, which is what
+        ``--missing-topic-policy fill`` does.  Observations cannot: there is
+        nothing to fill an absent camera or an absent ``joint_states`` with
+        except invented data.
+        """
+        return {self.arm.joint_states_topic, *self.cameras.values()}
+
+    @property
+    def optional_topics(self) -> set[str]:
+        """Declared streams that merely enrich the output when present.
+
+        An end-effector ``state_topic`` upgrades that effector's observation
+        from a command echo to a real measurement.  Recording generations differ
+        in whether they publish one, so its absence degrades to the documented
+        ``command_echo`` behaviour instead of rejecting the bag.
+        """
+        return {
+            effector.state_topic for effector in self.end_effectors if effector.state_topic
+        }
+
     def with_depth(self, include_depth: bool) -> RobotProfile:
         return self if include_depth else replace(self, depths={})
 
@@ -229,11 +374,24 @@ class RobotProfile:
                     "state_topic": effector.state_topic,
                     "state_kind": effector.state_kind,
                     "joint_names": list(effector.joint_names),
+                    "state_indices": list(effector.state_indices),
+                    "command_indices": list(effector.command_indices),
                 }
                 for effector in self.end_effectors
             ],
             "cameras": dict(self.cameras),
             "depths": dict(self.depths),
+            "camera_tiles": {
+                name: {
+                    "left": tile.left,
+                    "top": tile.top,
+                    "right": tile.right,
+                    "bottom": tile.bottom,
+                    "width": tile.width,
+                    "height": tile.height,
+                }
+                for name, tile in self.camera_tiles.items()
+            },
             "message_definitions": dict(self.message_definitions),
             "anchor_camera": self.resolved_anchor_camera,
             "state_dim": self.state_dim,
@@ -293,7 +451,12 @@ BUILTIN_PROFILES: dict[str, RobotProfile] = {
                 dim=1,
                 command_topic="/control/gripperValueL",
                 command_kind=FLOAT32,
-                state_topic=None,
+                # Component 0 of the feedback vector is the measured opening;
+                # older bags in this generation do not publish the topic at all,
+                # in which case the observation falls back to a command echo.
+                state_topic="/gripper/feedback_L",
+                state_kind=FLOAT32MULTIARRAY,
+                state_indices=(0,),
             ),
             EndEffectorSpec(
                 name="R",
@@ -301,7 +464,9 @@ BUILTIN_PROFILES: dict[str, RobotProfile] = {
                 dim=1,
                 command_topic="/control/gripperValueR",
                 command_kind=FLOAT32,
-                state_topic=None,
+                state_topic="/gripper/feedback_R",
+                state_kind=FLOAT32MULTIARRAY,
+                state_indices=(0,),
             ),
         ),
         cameras={
@@ -454,6 +619,19 @@ def _spec_from_dict(payload: dict[str, Any]) -> EndEffectorSpec:
         state_topic=payload.get("state_topic") or None,
         state_kind=str(payload.get("state_kind", JOINTSTATE)),
         joint_names=tuple(payload.get("joint_names") or ()),
+        state_indices=tuple(int(index) for index in payload.get("state_indices") or ()),
+        command_indices=tuple(int(index) for index in payload.get("command_indices") or ()),
+    )
+
+
+def _tile_from_dict(payload: dict[str, Any]) -> CameraTile:
+    return CameraTile(
+        left=float(payload.get("left", 0.0)),
+        top=float(payload.get("top", 0.0)),
+        right=float(payload.get("right", 1.0)),
+        bottom=float(payload.get("bottom", 1.0)),
+        width=int(payload.get("width", 0)),
+        height=int(payload.get("height", 0)),
     )
 
 
@@ -475,6 +653,10 @@ def profile_from_dict(payload: dict[str, Any]) -> RobotProfile:
             end_effectors=tuple(_spec_from_dict(item) for item in payload.get("end_effectors", ())),
             cameras=dict(payload.get("cameras") or {}),
             depths=dict(payload.get("depths") or {}),
+            camera_tiles={
+                name: _tile_from_dict(spec)
+                for name, spec in (payload.get("camera_tiles") or {}).items()
+            },
             message_definitions=dict(payload.get("message_definitions") or {}),
             anchor_camera=payload.get("anchor_camera"),
         )

@@ -111,6 +111,19 @@ class _CDRReader:
         self.pos += count * 8
         return np.asarray(values, dtype=np.float64)
 
+    def float32_sequence(self) -> np.ndarray:
+        count = self.uint32()
+        if count == 0:
+            return np.empty(0, dtype=np.float64)
+        self.align(4)
+        if count * 4 > self.remaining:
+            raise MessageDecodeError(
+                f"CDR sequence declares {count} float32 but only {self.remaining // 4} remain"
+            )
+        values = np.frombuffer(self.data, dtype=np.dtype(self.endian + "f4"), count=count, offset=self.pos)
+        self.pos += count * 4
+        return np.asarray(values, dtype=np.float64)
+
     def float64_array(self, count: int) -> np.ndarray:
         """Fixed-size array: no length prefix, elements aligned to 8 bytes."""
         if count == 0:
@@ -241,6 +254,22 @@ def parse_jointcmd_cdr(rawdata: bytes | memoryview, dim: int) -> tuple[int, np.n
 def parse_float32_cdr(rawdata: bytes | memoryview) -> float:
     """Parse a headerless ``std_msgs/Float32``."""
     return _CDRReader(rawdata).float32()
+
+
+def parse_float32multiarray_cdr(rawdata: bytes | memoryview) -> np.ndarray:
+    """Parse a headerless ``std_msgs/Float32MultiArray`` down to its ``data``.
+
+    The ``layout`` prefix is read and discarded: gripper feedback topics publish
+    a flat vector whose meaning is positional, so the profile picks components
+    by index rather than by the (usually empty) dimension labels.
+    """
+    reader = _CDRReader(rawdata)
+    for _ in range(reader.uint32()):  # layout.dim[]
+        reader.string()  # label
+        reader.uint32()  # size
+        reader.uint32()  # stride
+    reader.uint32()  # layout.data_offset
+    return reader.float32_sequence()
 
 
 # ---------------------------------------------------------------------------

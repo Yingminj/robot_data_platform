@@ -32,6 +32,7 @@ from robot_profile import (
     BUILTIN_PROFILES,
     DEFAULT_PROFILE,
     FLOAT32,
+    FLOAT32MULTIARRAY,
     ProfileError,
     RobotProfile,
     apply_topic_overrides,
@@ -67,12 +68,21 @@ def build_specs(profile: RobotProfile, include_depth: bool) -> Dict[str, TopicSp
     for topic in profile.arm.command_topics:
         specs[topic] = TopicSpec("arm_command", has_header=True, continuous=False)
     for effector in profile.end_effectors:
-        # std_msgs/Float32 grippers have no Header; record time is their only clock.
-        header = effector.command_kind != FLOAT32
-        specs[effector.command_topic] = TopicSpec("ee_command", has_header=header, continuous=False)
+        # std_msgs/Float32 and Float32MultiArray have no Header; record time is
+        # their only clock.
+        headerless = {FLOAT32, FLOAT32MULTIARRAY}
+        specs[effector.command_topic] = TopicSpec(
+            "ee_command", has_header=effector.command_kind not in headerless, continuous=False
+        )
         if effector.state_topic:
-            header = effector.state_kind != FLOAT32
-            specs[effector.state_topic] = TopicSpec("ee_state", has_header=header)
+            # A measured end-effector feedback topic only enriches the
+            # observation; recordings that lack it fall back to the command
+            # echo, so its absence is reported but does not fail the bag.
+            specs[effector.state_topic] = TopicSpec(
+                "ee_state",
+                has_header=effector.state_kind not in headerless,
+                required=False,
+            )
     return specs
 
 
@@ -275,7 +285,10 @@ def assess_topic(
             "estimated_drop_ratio": float(drop_ratio),
         })
         if drop_ratio >= args.fail_drop_ratio:
-            result["status"] = "FAIL"
+            # Optional streams only enrich the output, and are read with a
+            # tolerance far wider than their period, so their jitter is worth
+            # reporting but must not condemn an otherwise sound recording.
+            result["status"] = "FAIL" if spec.required else "WARN"
             result["issues"].append("high_estimated_drop_ratio")
         elif drop_ratio >= args.warn_drop_ratio and result["status"] == "PASS":
             result["status"] = "WARN"
@@ -478,6 +491,8 @@ def print_report(report: dict) -> None:
         print(f"\n缺失或为空的必需话题（profile {report['profile']} 需要）：")
         for topic in missing:
             print(f"  {topic}")
+        print("  转换时可用 --missing-topic-policy fill 由实测状态重建这些列"
+              "（重建列等于 observation，训练前请确认该自由度确实静止）")
 
     teleop = report["teleop"]
     print("\n遥操作命令活动区间：")

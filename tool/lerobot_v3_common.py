@@ -5,13 +5,14 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from conversion_common import AlignedEpisode, ConversionError
+from conversion_common import AlignedEpisode, ConversionError, progress_bar, progress_enabled
 
 
 @dataclass(frozen=True)
@@ -199,20 +200,26 @@ def append_episode(
     if dataset.fps != episode.fps:
         raise ConversionError(f"FPS differs between episodes: {episode.fps} != {dataset.fps}")
     assert_episode_schema(episode, features, include_velocity, include_depth)
-    for index in range(episode.frame_count):
-        frame: dict[str, Any] = {
-            "observation.state": episode.qpos[index],
-            "action": episode.action[index],
-            "task": task,
-        }
-        if include_velocity:
-            frame["observation.velocity"] = episode.qvel[index]
-        for name, images in episode.images.items():
-            frame[f"observation.images.{name}"] = images[index]
-        if include_depth:
-            for name, depths in episode.depths.items():
-                frame[f"observation.depths.{name}"] = depths[index][..., None]
-        dataset.add_frame(frame)
+    with progress_bar("write frames", episode.frame_count, unit="frame") as advance:
+        for index in range(episode.frame_count):
+            advance()
+            frame: dict[str, Any] = {
+                "observation.state": episode.qpos[index],
+                "action": episode.action[index],
+                "task": task,
+            }
+            if include_velocity:
+                frame["observation.velocity"] = episode.qvel[index]
+            for name, images in episode.images.items():
+                frame[f"observation.images.{name}"] = images[index]
+            if include_depth:
+                for name, depths in episode.depths.items():
+                    frame[f"observation.depths.{name}"] = depths[index][..., None]
+            dataset.add_frame(frame)
+    # save_episode() encodes the videos in one blocking call with no progress
+    # hook of its own, so announce it rather than appearing to hang.
+    if progress_enabled():
+        print(f"  encoding {episode.frame_count} frames...", file=sys.stderr, flush=True)
     dataset.save_episode(parallel_encoding=False)
 
 

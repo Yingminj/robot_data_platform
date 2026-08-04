@@ -10,10 +10,12 @@ import sys
 from pathlib import Path
 
 from conversion_common import (
+    PROGRESS_MODES,
     AlignmentConfig,
     ConversionError,
     align_rosbag,
     discover_rosbags,
+    set_progress_mode,
     sort_and_limit,
 )
 from robot_profile import (
@@ -77,6 +79,15 @@ def parse_args() -> argparse.Namespace:
         "fail=拒绝该 episode",
     )
     parser.add_argument(
+        "--missing-topic-policy",
+        choices=("fail", "fill"),
+        default="fail",
+        help="profile 声明但整段录制里没有的话题如何处理："
+        "fail=拒绝该 episode（默认）；"
+        "fill=用实测状态重建——手臂 joint_cmd 用该臂 joint_states，末端执行器指令用其实测反馈"
+        "（需配合 --action-gap-policy joint-state-fill；重建列与 observation 完全相同）",
+    )
+    parser.add_argument(
         "--grid-anchor",
         choices=("anchor-camera", "anchor-camera-ticks", "first-command"),
         default="anchor-camera-ticks",
@@ -108,29 +119,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-storage", choices=("video", "image"), default="video")
     parser.add_argument(
         "--video-codec",
-        default="libsvtav1",
+        default="h264",
         help="与 LeRobot 默认一致；CRF 取值范围随编码器不同（AV1 0-63，x264 0-51）",
     )
     parser.add_argument("--video-pixel-format", default="yuv420p")
-    parser.add_argument("--crf", type=float, default=0, help="0 表示无损；见 test_lerobot/REPORT.md")
+    parser.add_argument("--crf", type=float, default=20, help="0 表示无损；见 test_lerobot/REPORT.md")
     parser.add_argument("--gop", type=int, default=2)
     parser.add_argument("--preset", default=None)
     parser.add_argument("--fast-decode", type=int, default=0)
     parser.add_argument("--encoder-threads", type=int, default=None)
     parser.add_argument("--depth-crf", type=float, default=0)
     parser.add_argument("--image-writer-processes", type=int, default=0)
-    parser.add_argument("--image-writer-threads", type=int, default=0)
+    parser.add_argument("--image-writer-threads", type=int, default=8)
     parser.add_argument("--include-velocity", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--recursive", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--sort-by", choices=("name", "mtime"), default="name")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--on-error", choices=("fail", "skip"), default="fail")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--progress",
+        choices=PROGRESS_MODES,
+        default="auto",
+        help="单个 bag 内部的进度显示；auto=stderr 是终端时用进度条，否则每 10 秒一行",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    set_progress_mode(args.progress)
     output = args.output.expanduser().resolve()
     staging = output.with_name(f".{output.name}.incomplete-{os.getpid()}")
     dataset = None
@@ -161,6 +179,7 @@ def main() -> int:
             include_depth=args.include_depth,
             max_decode_errors=args.max_decode_errors,
             action_gap_policy=args.action_gap_policy,
+            missing_topic_policy=args.missing_topic_policy,
             grid_anchor=args.grid_anchor,
             max_hold_fraction=args.max_hold_fraction,
             max_hold_run_s=args.max_hold_run_s,

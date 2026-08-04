@@ -10,10 +10,12 @@ import time
 from pathlib import Path
 
 from conversion_common import (
+    PROGRESS_MODES,
     AlignmentConfig,
     ConversionError,
     align_rosbag,
     discover_rosbags,
+    set_progress_mode,
     sort_and_limit,
     write_aligned_hdf5,
 )
@@ -69,6 +71,15 @@ def parse_args() -> argparse.Namespace:
         "fail=拒绝该 episode",
     )
     parser.add_argument(
+        "--missing-topic-policy",
+        choices=("fail", "fill"),
+        default="fail",
+        help="profile 声明但整段录制里没有的话题如何处理："
+        "fail=拒绝该 episode（默认）；"
+        "fill=用实测状态重建——手臂 joint_cmd 用该臂 joint_states，末端执行器指令用其实测反馈"
+        "（需配合 --action-gap-policy joint-state-fill；重建列与 observation 完全相同）",
+    )
+    parser.add_argument(
         "--grid-anchor",
         choices=("anchor-camera", "anchor-camera-ticks", "first-command"),
         default="anchor-camera-ticks",
@@ -99,11 +110,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--on-error", choices=("fail", "skip"), default="fail")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--progress",
+        choices=PROGRESS_MODES,
+        default="auto",
+        help="单个 bag 内部的进度显示；auto=stderr 是终端时用进度条，否则每 10 秒一行",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    set_progress_mode(args.progress)
     try:
         profile = apply_topic_overrides(
             load_profile(args.profile),
@@ -125,6 +143,7 @@ def main() -> int:
             include_depth=args.include_depth,
             max_decode_errors=args.max_decode_errors,
             action_gap_policy=args.action_gap_policy,
+            missing_topic_policy=args.missing_topic_policy,
             grid_anchor=args.grid_anchor,
             max_hold_fraction=args.max_hold_fraction,
             max_hold_run_s=args.max_hold_run_s,

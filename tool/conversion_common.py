@@ -26,15 +26,20 @@ from __future__ import annotations
 
 import json
 import math
+import sys
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
 from robot_profile import (
     DEXHAND,
     FLOAT32,
+    FLOAT32MULTIARRAY,
     EndEffectorSpec,
     RobotProfile,
 )
@@ -46,6 +51,7 @@ from ros_messages import (
     header_stamp_ns_from_cdr,
     image_kind,
     parse_float32_cdr,
+    parse_float32multiarray_cdr,
     parse_jointcmd_cdr,
     read_jointstate,
     resize_letterbox,
@@ -58,6 +64,131 @@ class ConversionError(RuntimeError):
 
 COMMAND_ECHO = "command_echo"
 MEASURED = "measured"
+STATE_FILL = "state_fill"
+
+# How a topic named by the profile failed to deliver: not advertised by the
+# recording at all, or advertised but carrying no valid message.
+TOPIC_ABSENT = "absent"
+TOPIC_EMPTY = "empty"
+
+
+# ---------------------------------------------------------------------------
+# Progress reporting
+# ---------------------------------------------------------------------------
+#
+# Purely a display concern, so it is module state rather than an
+# ``AlignmentConfig`` field -- the config is serialised verbatim into the
+# dataset manifest, which should describe the conversion, not the terminal it
+# ran in.
+
+PROGRESS_MODES = ("auto", "bar", "plain", "none")
+
+_PROGRESS_MODE = "none"
+_PROGRESS_PLAIN_INTERVAL_S = 10.0
+
+
+def resolve_progress_mode(choice: str) -> str:
+    """Resolve a ``--progress`` choice; ``auto`` follows stderr being a TTY.
+
+    Same vocabulary as :class:`hdf5_to_lerobotv3.ProgressReporter` so the
+    converters take the same flag values.
+    """
+    if choice not in PROGRESS_MODES:
+        raise ValueError(f"unknown progress mode: {choice}")
+    if choice != "auto":
+        return choice
+    return "bar" if sys.stderr.isatty() else "plain"
+
+
+def set_progress_mode(choice: str) -> None:
+    """Select the progress display for this process (accepts ``auto``)."""
+    global _PROGRESS_MODE
+    _PROGRESS_MODE = resolve_progress_mode(choice)
+
+
+def progress_enabled() -> bool:
+    return _PROGRESS_MODE != "none"
+
+
+@contextmanager
+def progress_bar(desc: str, total: int | None, unit: str = "msg") -> Iterator[Callable[..., None]]:
+    """Yield an ``advance(n=1)`` callable that drives a progress display.
+
+    ``bar`` uses ``tqdm``; ``plain`` prints a line every few seconds, which is
+    what you want in a log file or under nohup.  ``tqdm`` is optional -- if it
+    is missing, ``bar`` degrades to ``plain`` rather than failing, so progress
+    never becomes a hard dependency.  Output goes to stderr and bars erase
+    themselves, leaving the per-bag stdout log as the durable record.
+    """
+    if _PROGRESS_MODE == "none":
+        yield lambda n=1: None
+        return
+
+    tqdm = None
+    if _PROGRESS_MODE == "bar":
+        try:
+            from tqdm.auto import tqdm
+        except ImportError:
+            tqdm = None
+
+    if tqdm is not None:
+        bar = tqdm(
+            total=total,
+            desc=desc,
+            unit=unit,
+            unit_scale=True,
+            leave=False,
+            file=sys.stderr,
+            dynamic_ncols=True,
+        )
+        try:
+            yield bar.update
+        finally:
+            bar.close()
+        return
+
+    seen = 0
+    last = time.monotonic()
+
+    def advance(n: int = 1) -> None:
+        nonlocal seen, last
+        seen += n
+        now = time.monotonic()
+        if now - last >= _PROGRESS_PLAIN_INTERVAL_S:
+            last = now
+            share = f" ({100.0 * seen / total:.1f}%)" if total else ""
+            print(f"  {desc}: {seen}/{total or '?'} {unit}{share}", file=sys.stderr, flush=True)
+
+    try:
+        yield advance
+    finally:
+        print(f"  {desc}: {seen} {unit} done", file=sys.stderr, flush=True)
+
+
+def _tracked(
+    iterable: Any, desc: str, total: int | None, unit: str = "msg"
+) -> Iterator[Any]:
+    """Yield from ``iterable``, advancing a progress bar for each item.
+
+    A generator wrapper rather than an inline ``with`` so that hot loop bodies
+    stay at their original indentation.  Closing the generator -- which Python
+    does when the consuming loop is abandoned or raises -- tears the bar down.
+    """
+    with progress_bar(desc, total, unit) as advance:
+        for item in iterable:
+            advance()
+            yield item
+
+
+def _connection_total(connections: list[Any]) -> int | None:
+    """Exact message count for the connections about to be iterated."""
+    total = 0
+    for connection in connections:
+        count = getattr(connection, "msgcount", None)
+        if not count:
+            return None
+        total += int(count)
+    return total or None
 
 
 @dataclass(frozen=True)
@@ -75,6 +206,7 @@ class AlignmentConfig:
     include_depth: bool = False
     max_decode_errors: int = 0
     action_gap_policy: str = "hold-last-command"
+    missing_topic_policy: str = "fail"
     grid_anchor: str = "anchor-camera-ticks"
     max_hold_fraction: float | None = None
     max_hold_run_s: float | None = None
@@ -92,6 +224,14 @@ class AlignmentConfig:
         if self.action_gap_policy not in {"fail", "hold-last-command", "joint-state-fill"}:
             raise ValueError(
                 "action_gap_policy must be fail, hold-last-command or joint-state-fill"
+            )
+        if self.missing_topic_policy not in {"fail", "fill"}:
+            raise ValueError("missing_topic_policy must be fail or fill")
+        if self.missing_topic_policy == "fill" and self.action_gap_policy != "joint-state-fill":
+            raise ValueError(
+                "missing_topic_policy fill reconstructs a silent arm from its own measured "
+                "joints, which is what action_gap_policy joint-state-fill does for gaps; "
+                "set action_gap_policy to joint-state-fill"
             )
         if self.grid_anchor not in {"anchor-camera", "anchor-camera-ticks", "first-command"}:
             raise ValueError(
@@ -342,6 +482,18 @@ class _RawBag:
     msgtypes: dict[str, str]
     topic_counts: dict[str, int]
     tolerant_parses: dict[str, int]
+    # ``topic -> "absent" | "empty"`` for profile topics the recording did not
+    # deliver; their columns are reconstructed downstream.
+    missing_topics: dict[str, str] = field(default_factory=dict)
+
+    def has_arm_command(self, topic: str) -> bool:
+        return topic not in self.missing_topics
+
+    def has_effector_command(self, effector: EndEffectorSpec) -> bool:
+        return effector.command_topic not in self.missing_topics
+
+    def has_effector_state(self, effector: EndEffectorSpec) -> bool:
+        return bool(effector.state_topic) and effector.state_topic not in self.missing_topics
 
 
 def open_bag_reader(bag_dir: Path, profile: RobotProfile) -> Any:
@@ -395,14 +547,35 @@ def _scan_bag(bag_dir: Path, profile: RobotProfile, cfg: AlignmentConfig) -> _Ra
     image_kinds: dict[str, str] = {}
     msgtypes: dict[str, str] = {}
 
+    # Recording generations differ in which of the profile's topics they
+    # actually publish, so classify what has to be present up front rather than
+    # rejecting anything the profile names.  ``essential`` has no substitute;
+    # ``fillable`` (arm and end-effector commands) can be reconstructed from
+    # measured state under --missing-topic-policy fill; ``optional`` (measured
+    # end-effector state) only enriches the observation when it exists.
+    essential = profile.essential_topics | set(depth_by_topic)
+    optional = profile.optional_topics
+    fillable = required - essential - optional
+    missing_topics: dict[str, str] = {}
+
     reader = open_bag_reader(bag_dir, profile)
     reader.open()
     try:
         available = {connection.topic for connection in reader.connections}
-        missing = sorted(required - available)
-        if missing:
-            raise ConversionError(f"Missing required topics: {missing}")
-        wanted = required | set(depth_by_topic)
+        absent_essential = sorted(essential - available)
+        if absent_essential:
+            raise ConversionError(f"Missing required topics: {absent_essential}")
+        absent_fillable = sorted(fillable - available)
+        if absent_fillable and cfg.missing_topic_policy != "fill":
+            raise ConversionError(
+                f"Missing required topics: {absent_fillable} "
+                "(use --missing-topic-policy fill to reconstruct them from measured state)"
+            )
+        for topic in absent_fillable:
+            missing_topics[topic] = TOPIC_ABSENT
+        for topic in sorted(optional - available):
+            missing_topics[topic] = TOPIC_ABSENT
+        wanted = (required | set(depth_by_topic)) & available
         connections = [c for c in reader.connections if c.topic in wanted]
         for connection in connections:
             msgtypes[connection.topic] = connection.msgtype
@@ -412,7 +585,11 @@ def _scan_bag(bag_dir: Path, profile: RobotProfile, cfg: AlignmentConfig) -> _Ra
                 except MessageDecodeError as exc:
                     raise ConversionError(f"{connection.topic}: {exc}") from exc
 
-        for connection, record_ns, rawdata in reader.messages(connections=connections):
+        for connection, record_ns, rawdata in _tracked(
+            reader.messages(connections=connections),
+            f"scan {bag_dir.name}",
+            _connection_total(connections),
+        ):
             topic = connection.topic
             stream = streams[topic]
             stream.count += 1
@@ -465,6 +642,17 @@ def _scan_bag(bag_dir: Path, profile: RobotProfile, cfg: AlignmentConfig) -> _Ra
                     # std_msgs/Float32 has no Header; record time is its only clock.
                     stamp = int(record_ns)
                     values = np.asarray([parse_float32_cdr(rawdata)], dtype=np.float64)
+                elif kind == FLOAT32MULTIARRAY:
+                    # Also headerless, and positional: the profile says which
+                    # components of the vector are the effector's position.
+                    stamp = int(record_ns)
+                    payload = parse_float32multiarray_cdr(rawdata)
+                    indices = effector.state_indices if is_state else effector.command_indices
+                    if payload.size <= max(indices):
+                        raise MessageDecodeError(
+                            f"{topic} carries {payload.size} values, need index {max(indices)}"
+                        )
+                    values = payload[list(indices)]
                 else:
                     message, fallback = read_jointstate(reader, rawdata, connection.msgtype)
                     stream.fallbacks += int(fallback)
@@ -489,9 +677,22 @@ def _scan_bag(bag_dir: Path, profile: RobotProfile, cfg: AlignmentConfig) -> _Ra
     if excessive:
         raise ConversionError(f"Decode/validation errors exceed limit: {excessive}")
 
-    empty = sorted(topic for topic in required if not streams[topic].times)
-    if empty:
-        raise ConversionError(f"Required topics contain no valid messages: {empty}")
+    empty = {topic for topic in required if not streams[topic].times} - set(missing_topics)
+    blocking = sorted(empty & essential)
+    if blocking:
+        raise ConversionError(f"Required topics contain no valid messages: {blocking}")
+    stalled = sorted(empty & fillable)
+    if stalled and cfg.missing_topic_policy != "fill":
+        raise ConversionError(
+            f"Required topics contain no valid messages: {stalled} "
+            "(use --missing-topic-policy fill to reconstruct them from measured state)"
+        )
+    for topic in sorted(empty):
+        missing_topics[topic] = TOPIC_EMPTY
+    if not set(profile.arm.command_topics) - set(missing_topics):
+        raise ConversionError(
+            "No arm command topic carries any message; the bag records no teleoperation"
+        )
 
     for topic, stream in streams.items():
         _ensure_monotonic(topic, np.asarray(stream.times, dtype=np.int64))
@@ -542,6 +743,7 @@ def _scan_bag(bag_dir: Path, profile: RobotProfile, cfg: AlignmentConfig) -> _Ra
         tolerant_parses={
             topic: stream.fallbacks for topic, stream in streams.items() if stream.fallbacks
         },
+        missing_topics=missing_topics,
     )
 
 
@@ -557,10 +759,14 @@ def _decode_selected_media(
     depth_indices: dict[str, np.ndarray],
 ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
     profile = raw.profile
-    selected_by_topic: dict[str, set[int]] = {
-        profile.cameras[name]: set(np.unique(indices).tolist())
-        for name, indices in image_indices.items()
-    }
+    # Several cameras can be tiles of one stitched topic, so accumulate rather
+    # than assigning: a plain dict comprehension keyed by topic would keep only
+    # the last camera's frame selection and silently drop the others'.
+    selected_by_topic: dict[str, set[int]] = {}
+    for name, indices in image_indices.items():
+        selected_by_topic.setdefault(profile.cameras[name], set()).update(
+            np.unique(indices).tolist()
+        )
     if cfg.include_depth:
         selected_by_topic.update(
             {
@@ -576,7 +782,11 @@ def _decode_selected_media(
     reader.open()
     try:
         connections = [c for c in reader.connections if c.topic in selected_by_topic]
-        for connection, _, rawdata in reader.messages(connections=connections):
+        for connection, _, rawdata in _tracked(
+            reader.messages(connections=connections),
+            f"decode {raw.bag_dir.name}",
+            _connection_total(connections),
+        ):
             topic = connection.topic
             index = counters[topic]
             counters[topic] += 1
@@ -585,8 +795,9 @@ def _decode_selected_media(
             try:
                 message = reader.deserialize(rawdata, connection.msgtype)
                 if topic in camera_topics:
+                    # Kept whole here; tiles are cut per camera below, so a
+                    # mosaic shared by three cameras is still decoded once.
                     value = decode_image(message, connection.msgtype)
-                    value = resize_letterbox(value, cfg.image_height, cfg.image_width)
                 else:
                     value = decode_depth(message, connection.msgtype)
                     value = resize_letterbox(value, cfg.image_height, cfg.image_width, is_depth=True)
@@ -603,7 +814,14 @@ def _decode_selected_media(
         missing = sorted(set(indices.tolist()) - set(decoded[topic]))
         if missing:
             raise ConversionError(f"Selected RGB frames missing for {name}: {missing[:10]}")
-        images[name] = np.stack([decoded[topic][int(i)] for i in indices]).astype(np.uint8, copy=False)
+        tile = profile.camera_tiles.get(name)
+        frames = []
+        for i in indices:
+            frame = decoded[topic][int(i)]
+            if tile is not None:
+                frame = tile.apply(frame)
+            frames.append(resize_letterbox(frame, cfg.image_height, cfg.image_width))
+        images[name] = np.stack(frames).astype(np.uint8, copy=False)
     for name, indices in depth_indices.items():
         topic = profile.depths[name]
         missing = sorted(set(indices.tolist()) - set(decoded[topic]))
@@ -632,17 +850,45 @@ class _Window:
 def _compute_window(raw: _RawBag, cfg: AlignmentConfig) -> _Window:
     """Teleoperation-activity window: first arm command to last arm command."""
     profile = raw.profile
-    command_start = max(int(raw.cmd_t[topic][0]) for topic in profile.arm.command_topics)
-    command_end = min(int(raw.cmd_t[topic][-1]) for topic in profile.arm.command_topics)
+    # An arm whose command topic never spoke has no span to contribute; it is
+    # reconstructed from its own measured joints for the whole episode, exactly
+    # as a silent stretch inside a bag would be.
+    live_command_topics = [t for t in profile.arm.command_topics if raw.has_arm_command(t)]
+    firsts = [int(raw.cmd_t[topic][0]) for topic in live_command_topics]
+    lasts = [int(raw.cmd_t[topic][-1]) for topic in live_command_topics]
+    if cfg.action_gap_policy == "joint-state-fill":
+        # A silent arm is filled from its own measured joints, which exist for
+        # the whole bag, so every row is defined as soon as *any* arm is being
+        # driven: take the union of the arms' command spans.  Sequential teleop
+        # -- drive one arm, then the other -- leaves the intersection empty even
+        # though the episode is perfectly usable.
+        command_start, command_end = min(firsts), max(lasts)
+    else:
+        # Holding the last command needs one from every arm, so the window can
+        # only start once each arm has spoken and must end while all are still
+        # live: the intersection of the command spans.
+        command_start, command_end = max(firsts), min(lasts)
     if command_end <= command_start:
-        raise ConversionError("Arm command topics do not overlap in time")
+        if cfg.action_gap_policy == "joint-state-fill":
+            raise ConversionError("Arm command topics carry no usable time span")
+        raise ConversionError(
+            "Arm command topics do not overlap in time; for sequential or "
+            "alternating single-arm teleop use --action-gap-policy joint-state-fill"
+        )
 
     observation_times: list[np.ndarray] = [raw.arm_t, *raw.image_t.values(), *raw.depth_t.values()]
-    observation_times.extend(raw.ee_state_t.values())
-    observation_times.extend(raw.ee_cmd_t.values())
+    for effector in profile.end_effectors:
+        # Whichever stream actually supplies this effector's observation is the
+        # one the window has to stay inside: a measurement when the recording
+        # has one, the command echo otherwise.
+        if raw.has_effector_state(effector):
+            observation_times.append(raw.ee_state_t[effector.name])
+        elif raw.has_effector_command(effector):
+            observation_times.append(raw.ee_cmd_t[effector.name])
 
-    bag_start = min(int(values[0]) for values in [*observation_times, *raw.cmd_t.values()])
-    bag_end = max(int(values[-1]) for values in [*observation_times, *raw.cmd_t.values()])
+    command_times = [raw.cmd_t[topic] for topic in live_command_topics]
+    bag_start = min(int(values[0]) for values in [*observation_times, *command_times])
+    bag_end = max(int(values[-1]) for values in [*observation_times, *command_times])
 
     # Anchor row 0 on the newest anchor-camera frame at or before teleop start,
     # so the episode opens on a fresh image rather than an arbitrary phase.
@@ -696,21 +942,44 @@ def _select_command(
     return indices, lead, real, np.ones_like(real, dtype=bool)
 
 
+def _fill_source(topic: str, profile: RobotProfile) -> str:
+    """What stood in for ``topic``, for the per-episode audit."""
+    if topic in profile.arm.command_topics:
+        return f"{profile.arm.joint_states_topic} (that arm's measured joints)"
+    for effector in profile.end_effectors:
+        if topic == effector.command_topic:
+            return f"{effector.state_topic} (measured position)"
+        if topic == effector.state_topic:
+            return f"{effector.command_topic} (command echo)"
+    return "unknown"
+
+
 def _effector_observation(
     effector: EndEffectorSpec,
     raw: _RawBag,
     grid_ns: np.ndarray,
     tolerance_ns: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, str]:
-    """Observed end-effector state; echoes the command when unmeasured."""
-    if effector.has_measured_state:
+    """Observed end-effector state; echoes the command when unmeasured.
+
+    ``has_measured_state`` is what the profile declares; ``has_effector_state``
+    is what this particular recording delivered.  Generations differ, so a
+    declared-but-absent feedback topic degrades to the command echo rather than
+    rejecting the bag.
+    """
+    if raw.has_effector_state(effector):
         times = raw.ee_state_t[effector.name]
         values = raw.ee_state_v[effector.name]
         source = MEASURED
-    else:
+    elif raw.has_effector_command(effector):
         times = raw.ee_cmd_t[effector.name]
         values = raw.ee_cmd_v[effector.name]
         source = COMMAND_ECHO
+    else:
+        raise ConversionError(
+            f"end effector {effector.name}: neither {effector.command_topic} nor a measured "
+            "state topic carries data, so its observation cannot be reconstructed"
+        )
     indices, age, valid = _previous_indices(times, grid_ns)
     valid &= age <= tolerance_ns
     return values[indices], times[indices], valid, source
@@ -824,10 +1093,20 @@ def align_rosbag(bag_dir: Path, profile: RobotProfile, cfg: AlignmentConfig) -> 
         valid_parts[f"state:{effector.name}"] = valid
 
     # -- arm action ------------------------------------------------------
+    live_command_topics = [t for t in profile.arm.command_topics if raw.has_arm_command(t)]
     cmd_indices: dict[str, np.ndarray] = {}
     cmd_leads: dict[str, np.ndarray] = {}
     real_masks: dict[str, np.ndarray] = {}
     for topic in profile.arm.command_topics:
+        if not raw.has_arm_command(topic):
+            # Nothing was ever published: every row is a fill row, which the
+            # joint-state-fill assembly below turns into that arm's measured
+            # joints.  No tick can violate a limit it has no sample for, so the
+            # topic contributes no validity mask.
+            cmd_indices[topic] = np.zeros(frame_count, dtype=np.intp)
+            cmd_leads[topic] = np.zeros(frame_count, dtype=np.int64)
+            real_masks[topic] = np.zeros(frame_count, dtype=bool)
+            continue
         indices, lead, real, valid = _select_command(
             raw.cmd_t[topic], raw.cmd_v[topic], grid_ns, action_tol, cfg.action_gap_policy
         )
@@ -837,7 +1116,7 @@ def align_rosbag(bag_dir: Path, profile: RobotProfile, cfg: AlignmentConfig) -> 
         valid_parts[f"command:{topic}"] = valid
 
     selected_cmd_times = np.stack(
-        [raw.cmd_t[topic][cmd_indices[topic]] for topic in profile.arm.command_topics]
+        [raw.cmd_t[topic][cmd_indices[topic]] for topic in live_command_topics]
     )
     command_skew = selected_cmd_times.max(axis=0) - selected_cmd_times.min(axis=0)
     all_real = np.logical_and.reduce([real_masks[t] for t in profile.arm.command_topics])
@@ -868,7 +1147,22 @@ def align_rosbag(bag_dir: Path, profile: RobotProfile, cfg: AlignmentConfig) -> 
     effector_action: dict[str, np.ndarray] = {}
     effector_action_t: dict[str, np.ndarray] = {}
     effector_action_age: dict[str, np.ndarray] = {}
+    effector_action_source: dict[str, str] = {}
     for effector in profile.end_effectors:
+        if not raw.has_effector_command(effector):
+            if not raw.has_effector_state(effector):
+                raise ConversionError(
+                    f"end effector {effector.name}: neither {effector.command_topic} nor a "
+                    "measured state topic carries data, so its action cannot be reconstructed"
+                )
+            # Same contract as a silent arm: the measured position is the only
+            # honest statement of what the operator asked for.  Identity copy of
+            # the observation, flagged in the audit.
+            effector_action[effector.name] = effector_state[effector.name]
+            effector_action_t[effector.name] = effector_state_t[effector.name]
+            effector_action_age[effector.name] = np.zeros(frame_count, dtype=np.int64)
+            effector_action_source[effector.name] = STATE_FILL
+            continue
         times = raw.ee_cmd_t[effector.name]
         values = raw.ee_cmd_v[effector.name]
         indices, age, valid = _previous_indices(times, reference_time)
@@ -876,6 +1170,7 @@ def align_rosbag(bag_dir: Path, profile: RobotProfile, cfg: AlignmentConfig) -> 
         effector_action[effector.name] = values[indices]
         effector_action_t[effector.name] = times[indices]
         effector_action_age[effector.name] = age
+        effector_action_source[effector.name] = "command"
         valid_parts[f"action:{effector.name}"] = valid
 
     # -- validity --------------------------------------------------------
@@ -913,7 +1208,10 @@ def align_rosbag(bag_dir: Path, profile: RobotProfile, cfg: AlignmentConfig) -> 
     arm_blocks: list[np.ndarray] = []
     joint_state_fill_rows: dict[str, int] = {}
     for position, topic in enumerate(profile.arm.command_topics):
-        block = raw.cmd_v[topic][keep(cmd_indices[topic])]
+        if raw.has_arm_command(topic):
+            block = raw.cmd_v[topic][keep(cmd_indices[topic])]
+        else:
+            block = np.zeros((int(arm_qpos.shape[0]), profile.arm.command_dim), dtype=np.float64)
         if cfg.action_gap_policy == "joint-state-fill":
             filled = ~keep(real_masks[topic])
             if filled.any():
@@ -979,7 +1277,7 @@ def align_rosbag(bag_dir: Path, profile: RobotProfile, cfg: AlignmentConfig) -> 
         "arm_state_ns": arm_state_t,
         "action_hold_mask": hold_mask,
     }
-    for topic in profile.arm.command_topics:
+    for topic in live_command_topics:
         key = topic.strip("/").replace("/", "_")
         timestamps[f"command_{key}_ns"] = raw.cmd_t[topic][keep(cmd_indices[topic])]
     for effector in profile.end_effectors:
@@ -1034,10 +1332,21 @@ def align_rosbag(bag_dir: Path, profile: RobotProfile, cfg: AlignmentConfig) -> 
             **{f"image_{name}": unique_ratio(indices) for name, indices in image_indices.items()},
             **{
                 f"command_{topic.strip('/').replace('/', '_')}": unique_ratio(keep(cmd_indices[topic]))
-                for topic in profile.arm.command_topics
+                for topic in live_command_topics
             },
         },
+        # Profile topics this recording did not deliver, and what replaced them.
+        # Reconstructed columns are an identity copy of the corresponding
+        # observation, so treat them as held rather than as demonstrated intent.
+        "missing_topics": {
+            topic: {
+                "status": status,
+                "filled_from": _fill_source(topic, profile),
+            }
+            for topic, status in sorted(raw.missing_topics.items())
+        },
         "end_effector_state_source": effector_state_source,
+        "end_effector_action_source": effector_action_source,
         "image_formats": {
             name: raw.image_kinds.get(topic, "unknown") for name, topic in profile.cameras.items()
         },
@@ -1058,7 +1367,7 @@ def align_rosbag(bag_dir: Path, profile: RobotProfile, cfg: AlignmentConfig) -> 
                 f"command_{topic.strip('/').replace('/', '_')}_lead": _stats_ms(
                     keep(cmd_leads[topic])[all_real]
                 )
-                for topic in profile.arm.command_topics
+                for topic in live_command_topics
             },
             "command_pair_skew": _stats_ms(command_skew),
             **{
