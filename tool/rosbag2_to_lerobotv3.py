@@ -70,15 +70,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--invalid-frame-policy", choices=("fail", "drop"), default="fail")
     parser.add_argument(
         "--action-gap-policy",
-        choices=("fail", "hold-last-command"),
+        choices=("fail", "hold-last-command", "joint-state-fill"),
         default="hold-last-command",
-        help="hold-last-command=断档时保持最后一条 joint_cmd（默认）；fail=拒绝该 episode",
+        help="hold-last-command=断档时保持最后一条 joint_cmd（默认）；"
+        "joint-state-fill=断档时按该手臂实测 joint_states 填充（旧版 .db3 遥操作会整段静默）；"
+        "fail=拒绝该 episode",
     )
     parser.add_argument(
         "--grid-anchor",
         choices=("anchor-camera", "anchor-camera-ticks", "first-command"),
-        default="anchor-camera",
-        help="第 0 帧对齐到首条 joint_cmd 之前最近的锚点相机帧（默认），或直接对齐到首条 joint_cmd",
+        default="anchor-camera-ticks",
+        help="anchor-camera-ticks（默认）=直接以锚点相机帧时刻为 tick，图像陈旧度恒为 0；"
+        "anchor-camera=从首条 joint_cmd 之前最近的锚点相机帧起按 1/fps 取 tick；"
+        "first-command=从首条 joint_cmd 起按 1/fps 取 tick",
     )
     parser.add_argument(
         "--max-hold-fraction",
@@ -92,6 +96,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="单段保持动作的最长时长（秒），超出则拒绝该 episode",
     )
+    parser.add_argument("--max-tick-rate-deviation", type=float, default=0.1,
+                        help="anchor-camera-ticks 下实测 tick 频率与 --fps 的最大相对偏差，默认 0.1")
     parser.add_argument("--max-decode-errors", type=int, default=0)
     parser.add_argument("--image-height", type=int, default=0)
     parser.add_argument("--image-width", type=int, default=0)
@@ -158,6 +164,7 @@ def main() -> int:
             grid_anchor=args.grid_anchor,
             max_hold_fraction=args.max_hold_fraction,
             max_hold_run_s=args.max_hold_run_s,
+            max_tick_rate_deviation=args.max_tick_rate_deviation,
         )
         print(
             f"profile={profile.name} state_dim={profile.state_dim} "

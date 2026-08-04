@@ -15,14 +15,81 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-ARM_DIM = 14
-STATE_DIM = 16
+
+@dataclass
+class Schema:
+    """Per-file layout, taken from the attributes the converter writes.
+
+    ``tool/conversion_common.py`` stores ``state_dim``, ``state_names_json`` and
+    the full ``profile_json`` on every file it produces, so the widths are read
+    from the file rather than assumed.  Older or hand-made files without those
+    attributes fall back to the observed ``action`` width.
+    """
+
+    state_dim: int
+    arm_dim: Optional[int] = None
+    state_names: Tuple[str, ...] = ()
+    profile_name: Optional[str] = None
+    # (name, kind, start, end) for each end effector, in state-vector order.
+    end_effectors: List[Tuple[str, str, int, int]] = field(default_factory=list)
+    source: str = "action shape"
+
+    @property
+    def diagnostic_dim(self) -> int:
+        """Columns used for step/lag diagnostics: the arm when it is known."""
+        return self.arm_dim if self.arm_dim else self.state_dim
+
+
+def read_schema(source: Any, declared_dim: int) -> Schema:
+    """Build a Schema from file attributes, falling back to the action width."""
+    raw_profile = source.attrs.get("profile_json")
+    attr_dim = source.attrs.get("state_dim")
+    state_dim = int(attr_dim) if attr_dim is not None else declared_dim
+
+    names: Tuple[str, ...] = ()
+    raw_names = source.attrs.get("state_names_json")
+    if raw_names is not None:
+        try:
+            parsed = json.loads(raw_names)
+            if isinstance(parsed, list):
+                names = tuple(str(item) for item in parsed)
+        except (ValueError, TypeError):
+            names = ()
+
+    if raw_profile is None:
+        return Schema(state_dim=state_dim, state_names=names,
+                      source="state_dim attr" if attr_dim is not None else "action shape")
+
+    try:
+        profile = json.loads(raw_profile)
+    except (ValueError, TypeError):
+        return Schema(state_dim=state_dim, state_names=names, source="state_dim attr")
+
+    arm_dim = len(profile.get("arm", {}).get("joint_names") or ()) or None
+    effectors: List[Tuple[str, str, int, int]] = []
+    offset = arm_dim or 0
+    for entry in profile.get("end_effectors") or ():
+        width = int(entry.get("dim", 0))
+        if width <= 0:
+            continue
+        effectors.append((str(entry.get("name", "?")), str(entry.get("kind", "?")),
+                          offset, offset + width))
+        offset += width
+    return Schema(
+        state_dim=state_dim,
+        arm_dim=arm_dim,
+        state_names=names,
+        profile_name=profile.get("name"),
+        end_effectors=effectors,
+        source="profile_json",
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -33,7 +100,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=0, help="最多检查前 N 个文件，0 表示不限制")
     parser.add_argument("--include-velocity", action=argparse.BooleanOptionalAction, default=True,
                         help="要求存在 observations/qvel（与转换脚本默认一致）")
-    parser.add_argument("--fps", type=int, default=30, help="用于把关节跳变换算成每秒角速度")
+    parser.add_argument("--fps", type=int, default=30,
+                        help="用于把关节跳变换算成每秒角速度；文件带 fps 属性时以文件为准")
     parser.add_argument("--sample-frames", type=int, default=8, help="每个相机抽样检查的帧数，0 表示跳过图像内容检查")
     parser.add_argument("--identical-warn-ratio", type=float, default=0.9,
                         help="action 与 qpos 完全相同的行占比超过该值时 WARN")
@@ -93,21 +161,49 @@ def check_arrays(report: Dict[str, Any], source: Any, args: argparse.Namespace) 
     frames = int(action_ds.shape[0])
     report["frames"] = frames
 
-    if frames < 1 or action_ds.shape != (frames, STATE_DIM):
-        issues.append(f"FAIL action 形状应为 (T,{STATE_DIM})，实际 {action_ds.shape}")
+    if frames < 1 or action_ds.ndim != 2:
+        issues.append(f"FAIL action 形状应为 (T,D)，实际 {action_ds.shape}")
         return
-    if qpos_ds.shape != (frames, STATE_DIM):
-        issues.append(f"FAIL qpos 形状应为 (T,{STATE_DIM})，实际 {qpos_ds.shape}")
+
+    # The expected width comes from the file's own attributes, so a 16-dim
+    # gripper episode and a 54-dim dexhand episode are both checked correctly.
+    schema = read_schema(source, int(action_ds.shape[1]))
+    state_dim = schema.state_dim
+    report["schema"] = {
+        "state_dim": state_dim,
+        "arm_dim": schema.arm_dim,
+        "profile": schema.profile_name,
+        "source": schema.source,
+    }
+
+    if action_ds.shape != (frames, state_dim):
+        issues.append(
+            f"FAIL action 形状应为 (T,{state_dim})（来自 {schema.source}），实际 {action_ds.shape}"
+        )
         return
-    if args.include_velocity and source["observations/qvel"].shape != (frames, STATE_DIM):
-        issues.append(f"FAIL qvel 形状应为 (T,{STATE_DIM})，实际 {source['observations/qvel'].shape}")
+    if qpos_ds.shape != (frames, state_dim):
+        issues.append(f"FAIL qpos 形状应为 (T,{state_dim})，实际 {qpos_ds.shape}")
         return
+    if args.include_velocity and source["observations/qvel"].shape != (frames, state_dim):
+        issues.append(f"FAIL qvel 形状应为 (T,{state_dim})，实际 {source['observations/qvel'].shape}")
+        return
+    if schema.state_names and len(schema.state_names) != state_dim:
+        issues.append(
+            f"FAIL state_names_json 有 {len(schema.state_names)} 个名称，但 state_dim 为 {state_dim}"
+        )
     if frames < args.min_frames:
         issues.append(f"WARN 帧数过少：{frames} < {args.min_frames}")
 
     action = np.asarray(action_ds[:], dtype=np.float64)
     qpos = np.asarray(qpos_ds[:], dtype=np.float64)
-    report["duration_s"] = frames / args.fps if args.fps > 0 else None
+    # Prefer the rate the file was written at over the CLI default.
+    fps = args.fps
+    try:
+        fps = int(source.attrs["fps"])
+    except (KeyError, TypeError, ValueError):
+        pass
+    report["fps"] = fps
+    report["duration_s"] = frames / fps if fps > 0 else None
 
     for name, array, dataset in (("action", action, action_ds), ("qpos", qpos, qpos_ds)):
         if dataset.dtype != np.float32:
@@ -132,12 +228,15 @@ def check_arrays(report: Dict[str, Any], source: Any, args: argparse.Namespace) 
         issues.append(f"WARN action 有 {100 * identical_ratio:.1f}% 的行与 qpos 完全相同")
 
     # Diagnostic: a real command leads the measured state, so the best match
-    # should be at a positive lag, not at lag 0.
+    # should be at a positive lag, not at lag 0.  Restricted to the arm columns
+    # when the profile identifies them, since end effectors move on their own
+    # timescale (and an unmeasured one is a command echo by construction).
+    arm_cols = schema.diagnostic_dim
     lags: Dict[int, float] = {}
     for lag in range(0, max(args.max_lag, 0) + 1):
         if frames - lag < 2:
             break
-        lags[lag] = float(np.abs(action[: frames - lag, :ARM_DIM] - qpos[lag:, :ARM_DIM]).mean())
+        lags[lag] = float(np.abs(action[: frames - lag, :arm_cols] - qpos[lag:, :arm_cols]).mean())
     if lags:
         best_lag = min(lags, key=lambda key: lags[key])
         report["best_action_lag"] = {"lag_frames": best_lag, "mean_abs_diff": lags[best_lag],
@@ -145,22 +244,31 @@ def check_arrays(report: Dict[str, Any], source: Any, args: argparse.Namespace) 
         if best_lag == 0 and lags[0] < 1e-6 and identical_rows != frames:
             issues.append("WARN action 与同帧 qpos 几乎一致（lag=0），疑似用状态回填了指令")
 
-    # Constant (dead) columns usually mean an unplugged joint or gripper topic.
+    def label(index: int) -> str:
+        if schema.state_names and index < len(schema.state_names):
+            return f"{index}:{schema.state_names[index]}"
+        return str(index)
+
+    # Constant (dead) columns usually mean an unplugged joint or end effector.
     for name, array in (("action", action), ("qpos", qpos)):
         dead = [int(i) for i in np.where(array.max(axis=0) == array.min(axis=0))[0]]
         if dead:
-            issues.append(f"WARN {name} 的常量维度 {dead}（全程无变化）")
+            shown = [label(i) for i in dead[:12]]
+            more = f" 等 {len(dead)} 维" if len(dead) > 12 else ""
+            issues.append(f"WARN {name} 的常量维度 {shown}{more}（全程无变化）")
         report.setdefault("dead_dims", {})[name] = dead
 
     # Discontinuities and frozen state.
-    steps = np.abs(np.diff(qpos[:, :ARM_DIM], axis=0)) if frames > 1 else np.zeros((0, ARM_DIM))
+    steps = np.abs(np.diff(qpos[:, :arm_cols], axis=0)) if frames > 1 else np.zeros((0, arm_cols))
     max_step = float(steps.max()) if steps.size else 0.0
     report["qpos_max_step_rad"] = max_step
-    report["qpos_max_step_rad_per_s"] = max_step * args.fps if args.fps > 0 else None
+    report["qpos_max_step_rad_per_s"] = max_step * fps if fps > 0 else None
     if max_step > args.max_step_rad:
         dim = int(np.unravel_index(np.argmax(steps), steps.shape)[1])
         frame = int(np.unravel_index(np.argmax(steps), steps.shape)[0])
-        issues.append(f"WARN qpos 最大帧间跳变 {max_step:.3f} rad（维度 {dim}，帧 {frame}）超过阈值")
+        issues.append(
+            f"WARN qpos 最大帧间跳变 {max_step:.3f} rad（维度 {label(dim)}，帧 {frame}）超过阈值"
+        )
 
     if frames > 1:
         frozen = int(np.count_nonzero(np.all(np.diff(qpos, axis=0) == 0, axis=1)))
@@ -169,8 +277,24 @@ def check_arrays(report: Dict[str, Any], source: Any, args: argparse.Namespace) 
         if frozen_ratio > args.static_warn_ratio:
             issues.append(f"WARN qpos 有 {100 * frozen_ratio:.1f}% 的相邻帧完全相同，疑似状态未更新")
 
-    grip = qpos[:, ARM_DIM:STATE_DIM]
-    report["gripper_range"] = [[float(grip[:, i].min()), float(grip[:, i].max())] for i in range(grip.shape[1])]
+    # Per end effector, not a fixed qpos[:, 14:16] gripper slice: a dexhand
+    # occupies 20 columns and a gripper 1, both taken from the profile.
+    ranges: Dict[str, Any] = {}
+    for name, kind, start, end in schema.end_effectors:
+        if end > state_dim:
+            continue
+        block = qpos[:, start:end]
+        ranges[name] = {
+            "kind": kind,
+            "dims": [start, end],
+            "min": float(block.min()),
+            "max": float(block.max()),
+            "moving_dims": int(np.count_nonzero(block.max(axis=0) != block.min(axis=0))),
+        }
+        if ranges[name]["moving_dims"] == 0:
+            issues.append(f"WARN 末端执行器 {name}（{kind}，{end - start} 维）全程无变化")
+    if ranges:
+        report["end_effector_range"] = ranges
 
 
 def check_images(report: Dict[str, Any], source: Any, args: argparse.Namespace) -> None:
@@ -287,7 +411,11 @@ def check_file(path: Path, args: argparse.Namespace) -> Dict[str, Any]:
                 action = next((e for e in report["layout"] if e["path"] == "action"), None)
                 if action and action["shape"]:
                     report["frames"] = int(action["shape"][0])
-                    report["duration_s"] = report["frames"] / args.fps if args.fps > 0 else None
+                    try:
+                        fps = int(source.attrs["fps"])
+                    except (KeyError, TypeError, ValueError):
+                        fps = args.fps
+                    report["duration_s"] = report["frames"] / fps if fps > 0 else None
                 return {**report, "status": "INFO"}
             check_arrays(report, source, args)
             if args.sample_frames > 0:
@@ -307,6 +435,10 @@ def print_file_report(report: Dict[str, Any], quiet: bool) -> None:
     head = (f"{report['status']:<4} {name}  帧数={frames if frames is not None else '-'}"
             f"  时长={fmt(duration, 1)}s  大小={report['size_gib']:.2f} GiB")
     print(head)
+    schema = report.get("schema")
+    if schema:
+        print(f"       维度：state_dim={schema['state_dim']} arm_dim={schema['arm_dim'] or '未知'}"
+              f" profile={schema['profile'] or '未知'}（来自 {schema['source']}）")
     if report.get("attrs"):
         print(f"       文件属性：{report['attrs']}")
     if report.get("layout"):
@@ -327,9 +459,11 @@ def print_file_report(report: Dict[str, Any], quiet: bool) -> None:
     if report.get("qpos_max_step_rad") is not None:
         print(f"       qpos 最大帧间跳变 {fmt(report['qpos_max_step_rad'])} rad"
               f" | 冻结帧占比 {fmt(100 * report.get('qpos_frozen_ratio', 0.0), 1)}%")
-    if report.get("gripper_range"):
-        ranges = " ".join(f"[{lo:.3f},{hi:.3f}]" for lo, hi in report["gripper_range"])
-        print(f"       夹爪取值范围 {ranges}")
+    for name, entry in (report.get("end_effector_range") or {}).items():
+        start, end = entry["dims"]
+        print(f"       末端执行器 {name}（{entry['kind']}，维度 {start}-{end - 1}）"
+              f" 取值 [{entry['min']:.3f},{entry['max']:.3f}]"
+              f" 活动维度 {entry['moving_dims']}/{end - start}")
     for camera, entry in (report.get("cameras") or {}).items():
         shape = "x".join(str(v) for v in entry["shape"])
         extra = ""

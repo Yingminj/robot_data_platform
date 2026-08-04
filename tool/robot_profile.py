@@ -135,10 +135,16 @@ class RobotProfile:
     cameras: dict[str, str] = None  # type: ignore[assignment]
     depths: dict[str, str] = None  # type: ignore[assignment]
     anchor_camera: str | None = None
+    # ``typename -> .msg definition text`` for message types the bag does not
+    # carry itself.  MCAP embeds its schemas, but rosbag2 sqlite3 (format
+    # version 5) stores only type *names*, so custom types must be supplied
+    # here or the bag cannot be opened at all.
+    message_definitions: dict[str, str] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "cameras", dict(self.cameras or {}))
         object.__setattr__(self, "depths", dict(self.depths or {}))
+        object.__setattr__(self, "message_definitions", dict(self.message_definitions or {}))
         if not self.cameras:
             raise ProfileError(f"profile {self.name}: at least one camera is required")
         names = [effector.name for effector in self.end_effectors]
@@ -228,6 +234,7 @@ class RobotProfile:
             ],
             "cameras": dict(self.cameras),
             "depths": dict(self.depths),
+            "message_definitions": dict(self.message_definitions),
             "anchor_camera": self.resolved_anchor_camera,
             "state_dim": self.state_dim,
             "action_dim": self.action_dim,
@@ -251,6 +258,21 @@ _DEXHAND_JOINTS = tuple(
 
 def _dexhand_names(side: str) -> tuple[str, ...]:
     return tuple(name for name in _DEXHAND_JOINTS if name.startswith(f"{side}_"))
+
+
+def _jointcmd_def(dim: int) -> str:
+    """The ``marvin_msgs`` arm command layout: a header plus fixed positions.
+
+    ``Jointcmd`` (older) and ``JointcmdArm`` (newer) are byte-identical; only
+    the type name changed, so both map to the same definition.
+    """
+    return f"std_msgs/Header header\nfloat64[{dim}] positions\n"
+
+
+_MARVIN_MESSAGE_DEFS = {
+    "marvin_msgs/msg/Jointcmd": _jointcmd_def(7),
+    "marvin_msgs/msg/JointcmdArm": _jointcmd_def(7),
+}
 
 
 BUILTIN_PROFILES: dict[str, RobotProfile] = {
@@ -293,8 +315,91 @@ BUILTIN_PROFILES: dict[str, RobotProfile] = {
             "wrist_R": "/camera_right_wrist/camera_right_wrist/aligned_depth_to_color/image_raw",
         },
         anchor_camera="top",
+        message_definitions=_MARVIN_MESSAGE_DEFS,
     ),
-    # Current MCAP setup: compressed JPEG cameras, 20-DoF dexterous hands.
+    # Bulk of the recorded corpus: MCAP, legacy arm topic names, 20-DoF
+    # dexterous hands with measured state, raw sensor_msgs/Image cameras.
+    "marvin-dexhand": RobotProfile(
+        name="marvin-dexhand",
+        robot_type="marvin",
+        arm=ArmSpec(
+            joint_states_topic="/joint_states",
+            joint_names=_MARVIN_ARM_JOINTS,
+            command_topics=("/control/joint_cmd_A", "/control/joint_cmd_B"),
+            command_dim=7,
+        ),
+        end_effectors=(
+            EndEffectorSpec(
+                name="left_hand",
+                kind=DEXHAND,
+                dim=20,
+                command_topic="/hand_left/joint_commands",
+                command_kind=JOINTSTATE,
+                state_topic="/hand_left/joint_states",
+                joint_names=_dexhand_names("left"),
+            ),
+            EndEffectorSpec(
+                name="right_hand",
+                kind=DEXHAND,
+                dim=20,
+                command_topic="/hand_right/joint_commands",
+                command_kind=JOINTSTATE,
+                state_topic="/hand_right/joint_states",
+                joint_names=_dexhand_names("right"),
+            ),
+        ),
+        cameras={
+            "top": "/camera/camera/color/image_raw",
+            "wrist_L": "/wrist_left/wrist_left/color/image_rect_raw",
+            "wrist_R": "/wrist_right/wrist_right/color/image_rect_raw",
+        },
+        depths={
+            "top": "/camera/camera/aligned_depth_to_color/image_raw",
+            "wrist_L": "/wrist_left/wrist_left/aligned_depth_to_color/image_raw",
+            "wrist_R": "/wrist_right/wrist_right/aligned_depth_to_color/image_raw",
+        },
+        anchor_camera="top",
+        message_definitions=_MARVIN_MESSAGE_DEFS,
+    ),
+    # Same rig recorded with the head camera only.  A camera that is absent from
+    # the bag cannot be an optional field of one profile: every episode in a
+    # LeRobot dataset must expose the same feature set, so the two camera
+    # layouts are two profiles and therefore two datasets.
+    "marvin-dexhand-head": RobotProfile(
+        name="marvin-dexhand-head",
+        robot_type="marvin",
+        arm=ArmSpec(
+            joint_states_topic="/joint_states",
+            joint_names=_MARVIN_ARM_JOINTS,
+            command_topics=("/control/joint_cmd_A", "/control/joint_cmd_B"),
+            command_dim=7,
+        ),
+        end_effectors=(
+            EndEffectorSpec(
+                name="left_hand",
+                kind=DEXHAND,
+                dim=20,
+                command_topic="/hand_left/joint_commands",
+                command_kind=JOINTSTATE,
+                state_topic="/hand_left/joint_states",
+                joint_names=_dexhand_names("left"),
+            ),
+            EndEffectorSpec(
+                name="right_hand",
+                kind=DEXHAND,
+                dim=20,
+                command_topic="/hand_right/joint_commands",
+                command_kind=JOINTSTATE,
+                state_topic="/hand_right/joint_states",
+                joint_names=_dexhand_names("right"),
+            ),
+        ),
+        cameras={"top": "/camera/camera/color/image_raw"},
+        depths={"top": "/camera/camera/aligned_depth_to_color/image_raw"},
+        anchor_camera="top",
+        message_definitions=_MARVIN_MESSAGE_DEFS,
+    ),
+    # Newer MCAP setup: compressed JPEG cameras, /tj-prefixed arm topics.
     "tj-dexhand": RobotProfile(
         name="tj-dexhand",
         robot_type="marvin",
@@ -332,6 +437,7 @@ BUILTIN_PROFILES: dict[str, RobotProfile] = {
         },
         depths={},
         anchor_camera="top",
+        message_definitions=_MARVIN_MESSAGE_DEFS,
     ),
 }
 
@@ -369,6 +475,7 @@ def profile_from_dict(payload: dict[str, Any]) -> RobotProfile:
             end_effectors=tuple(_spec_from_dict(item) for item in payload.get("end_effectors", ())),
             cameras=dict(payload.get("cameras") or {}),
             depths=dict(payload.get("depths") or {}),
+            message_definitions=dict(payload.get("message_definitions") or {}),
             anchor_camera=payload.get("anchor_camera"),
         )
     except KeyError as exc:

@@ -15,17 +15,29 @@ action            = 观测之后的第一对 joint_cmd
 
 支持 rosbag2 的两种存储后端（sqlite3 `.db3` 与 MCAP `.mcap`），以及两种图像格式
 （`sensor_msgs/Image` 与 `sensor_msgs/CompressedImage`）。图像格式由连接的消息类型自动识别，
-无需手工配置。MCAP 自带 schema，因此不需要再手工注册 `marvin_msgs` 类型定义。
+无需手工配置。
+
+MCAP 自带 schema；**rosbag2 sqlite3（format version 5）不带**，`.db3` 里只有类型名称，
+没有消息定义，直接打开会报 `Bag contains no type definitions`。因此自定义类型由 profile 的
+`message_definitions` 提供（`类型名 -> .msg 定义文本`），内置 profile 已经声明了
+`marvin_msgs/msg/Jointcmd` 与 `marvin_msgs/msg/JointcmdArm`（两者布局相同，只是改了名）。
+标准 ROS 2 消息来自内置 Humble typestore。该 typestore 只在 bag 自身没有定义时才被使用，
+所以对 MCAP 不会产生任何覆盖。
 
 ## Robot profile
 
 `tool/robot_profile.py` 用声明式配置描述"机器人是什么"：话题名、末端执行器类型与自由度、相机映射。
-内置两个 profile：
+内置四个 profile：
 
-| profile | 图像 | 末端执行器 | state_dim |
-|---|---|---|---|
-| `marvin-gripper` | `sensor_msgs/Image` | `gripper` × 2（各 1 维，`std_msgs/Float32`） | 16 |
-| `tj-dexhand`（默认） | `CompressedImage`（JPEG） | `dexhand` × 2（各 20 维，`JointState`） | 54 |
+| profile | 手臂话题 | 图像 | 相机 | 末端执行器 | state_dim |
+|---|---|---|---|---|---|
+| `marvin-gripper` | `/joint_states`, `/control/joint_cmd_A\|B` | `sensor_msgs/Image` | 3 | `gripper` × 2（各 1 维，`std_msgs/Float32`） | 16 |
+| `marvin-dexhand` | 同上 | `sensor_msgs/Image` | 3（`/camera/camera`, `/wrist_*`） | `dexhand` × 2（各 20 维，`JointState`） | 54 |
+| `marvin-dexhand-head` | 同上 | `sensor_msgs/Image` | 1（仅 `/camera/camera`） | `dexhand` × 2 | 54 |
+| `tj-dexhand`（默认） | `/tj/joint_states`, `/tj/control/joint_cmd_A\|B` | `CompressedImage`（JPEG） | 3（`/head_camera`, `/wrist_*_camera`） | `dexhand` × 2 | 54 |
+
+相机数量不同必须用不同 profile：LeRobot 数据集要求每个 episode 暴露相同的特征集，
+所以"只有头部相机"的录制和"三相机"的录制是两个数据集，不能混在一起转换。
 
 用 `--profile <名称或 JSON 路径>` 选择。自定义机器人写一个 JSON 即可，不需要改代码：
 
@@ -77,24 +89,48 @@ LeRobot 0.6 的官方 `record_loop()` 顺序是 `robot.get_observation()` → `t
 
 `joint_cmd` 通常只在使能状态下发布，一个 bag 里可能只有一小段是真正的遥操作。窗口规则：
 
-- 起点：首条 `joint_cmd` **之前最近的一帧锚点相机图像**（`--grid-anchor anchor-camera`，默认），
+- 起点：首条 `joint_cmd` **之前最近的一帧锚点相机图像**，
   这样第 0 行就是一帧新鲜图像，同时把遥操作开始作为数据集起点
 - 终点：最后一条 `joint_cmd`
 - 窗口之外的数据全部丢弃
-- 窗口内部的 `joint_cmd` 断档：保持最后一条已下发指令（zero-order hold）
+- 窗口内部的 `joint_cmd` 断档：按 `--action-gap-policy` 处理（见下）
+
+### 断档处理：`--action-gap-policy`
+
+| 取值 | 断档时的 action | 适用场景 |
+|---|---|---|
+| `hold-last-command`（默认） | 保持最后一条已下发指令（zero-order hold） | 命令流连续、只有偶发抖动 |
+| `joint-state-fill` | 用**该手臂自己实测的 `joint_states`** 填充 | 旧版 `.db3`：遥操作逻辑会让某条手臂的 `joint_cmd` 整段静默 |
+| `fail` | 拒绝该 episode | 需要严格门禁的生产数据 |
+
+`joint-state-fill` 是按手臂分别填充的：`arm.command_topics` 中第 *i* 个话题固定对应
+`joint_names[i * command_dim : (i+1) * command_dim]` 这一段列（由 `ArmSpec` 保证），
+所以某条手臂静默时只填它自己的列，另一条手臂的真实指令不受影响。
+
+被填充的列在这些行上就是观测的恒等副本。因此该策略下的行判定也随之改变：
+只要**任意一条**手臂有真实指令，该行就算有效遥操作意图（否则单臂 episode 会被整体屏蔽）。
+
+- `timestamps/action_hold_mask`：该策略下标记的是"**没有任何**手臂下发指令"的行
+- `audit.hold.joint_state_fill_rows`：每条手臂被 joint_states 填充的行数
+- `audit.hold.any_arm_real_command_rows` / `real_command_rows`：任意手臂 / 全部手臂有真实指令的行数
+
+⚠️ 某条手臂**全程**被填充时（例如实测样例 bag 的左臂 637/637 行），它的动作列对策略而言
+就是恒等映射，只能表达"保持当前位姿"。确认该手臂确实是停放状态再用于训练——
+实测样例中左臂在整个窗口内的关节变化仅 0.0056 rad，属于传感器噪声量级。
 
 `--grid-anchor` 三种取值：
 
 | 取值 | 网格 | 锚点相机陈旧度 |
 |---|---|---|
+| `anchor-camera-ticks`（默认） | **直接以锚点相机帧时刻为 tick** | 恒为 0 |
 | `anchor-camera` | 从锚点相机帧起，固定 1/fps | 最大约一个相机周期 |
-| `anchor-camera-ticks` | **直接以锚点相机帧时刻为 tick** | 恒为 0 |
 | `first-command` | 从首条 joint_cmd 起，固定 1/fps | 最大约一个相机周期 |
 
 当相机帧率与 `--fps` 接近时（例如 30 Hz 相机 + `--fps 30`），`anchor-camera` 的相位会锁死，
 导致几乎每一行的图像都陈旧接近一整个周期。实测样例 bag：`anchor-camera` 的 top 相机年龄
 p50 = 30.78 ms，而 `anchor-camera-ticks` 为 0.00 ms，帧数与命令延迟完全相同。
-**相机是最慢的观测流时，建议用 `anchor-camera-ticks`。**
+因此 `anchor-camera-ticks` 是两个转换脚本的默认值。注意此时行数由锚点相机的实际帧率决定，
+`--fps` 只用于写入元数据与容差换算。
 
 ### hold 行的记账
 
@@ -135,6 +171,18 @@ conda run -n lerobot python tool/rosbag2_to_lerobotv3.py \
   --grid-anchor anchor-camera-ticks
 ```
 
+旧版 `.db3`（`marvin-gripper` 一代）需要加 `--action-gap-policy joint-state-fill`，
+因为这批录制里两条手臂是**交替**遥操作的，某条手臂会整段没有 `joint_cmd`：
+
+```bash
+conda run -n lerobot python tool/rosbag2_to_lerobotv3.py \
+  --input /path/to/gift_bags \
+  --output /path/to/my_dataset \
+  --profile marvin-gripper \
+  --action-gap-policy joint-state-fill \
+  --fps 30 --on-error skip
+```
+
 **训练数据建议直接走这条路径，不要经过 HDF5。** 同一段数据实测：
 gzip HDF5 273 MB，LeRobot v3（AV1 CRF 0 无损）7.6 MB，差 36 倍。
 HDF5 适合做归档、ACT 兼容或调试。
@@ -160,6 +208,24 @@ conda run -n lerobot python tool/hdf5_to_lerobotv3.py \
 策略只会学到 `a_t = s_t`，请确认这是预期行为。需要恢复旧的严格行为时加 `--strict-action`。
 
 转换前可用 `tool/check_hdf5_quality.py` 先体检 HDF5（`--layout` 可列出数据集结构）。
+维度不写死：state 宽度、手臂维度、各末端执行器的切片都从文件的 `state_dim` /
+`state_names_json` / `profile_json` 属性读取，因此 16 维夹爪与 54 维灵巧手都能正确检查；
+缺少这些属性的旧文件退化为按 `action` 实际宽度检查。
+
+## 0. 转换前：体检 rosbag
+
+```bash
+conda run -n lerobot python tool/check_rosbag_quality.py /path/to/rosbag --profile marvin-dexhand
+```
+
+检查器与转换脚本共用同一份 profile 和同一个 reader，因此两者对"这个录制应该包含什么"
+的判断永远一致，`.db3` 与 `.mcap` 都能读。只读时间戳、不解码图像，多 GiB 的 bag 几秒完成。
+标称频率由实测中位周期得出，不写死，所以 30 Hz 相机与 500 Hz 关节流用同一套阈值。
+
+命令话题（`joint_cmd`、末端执行器指令）只在使能时发布，其断档是操作行为而不是丢帧，
+因此不参与丢帧评分，改为在"遥操作命令活动区间"一节里按区间列出。这一节还会直接指出
+**两臂交替遥操作**的情况：如果某个手臂的静默区间覆盖了整个重叠窗口，
+转换必然产出零行，检查器会提前报 FAIL 而不是让转换抛出难以理解的错误。
 
 转换过程默认屏蔽 ffmpeg/libx264 与 tqdm 日志，改为显示进度块（episode 计数、已写帧数、
 已用时间与 ETA、`action==state` 计数）。`--progress auto|bar|plain|none` 控制显示方式
@@ -191,7 +257,8 @@ CRF 0 消除量化损失，但 `yuv420p` 仍有色度下采样；要求 RGB 逐�
 --action-pair-tolerance-ms    默认 5 ms
 --end-effector-tolerance-ms   默认 100 ms
 --invalid-frame-policy fail   默认；可选 drop
---action-gap-policy hold-last-command   默认；可选 fail
+--action-gap-policy hold-last-command   默认；可选 joint-state-fill / fail
+--max-tick-rate-deviation 0.1 anchor-camera-ticks 下 tick 频率与 --fps 的最大相对偏差
 --max-hold-fraction / --max-hold-run-s  hold 过多时拒绝 episode
 --max-decode-errors 0         默认任何必需消息解析错误都失败
 ```

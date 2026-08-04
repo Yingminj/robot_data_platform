@@ -6,7 +6,7 @@ single huge commit, so an interrupted run can simply be restarted: files that
 already exist on the Hub are skipped by the server-side dedup check.
 
 Example:
-    export HF_TOKEN=hf_xxx            # or: hf auth login
+    export HF_TOKEN=hf_xx            # or: hf auth login
     python tool/upload_lerobot_to_hf.py \
         --local-dir /media/kewei/DATA-S2/tea_2_lerobot \
         --repo-id yyyyywv/egocentric \

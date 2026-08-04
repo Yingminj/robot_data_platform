@@ -75,19 +75,24 @@ class AlignmentConfig:
     include_depth: bool = False
     max_decode_errors: int = 0
     action_gap_policy: str = "hold-last-command"
-    grid_anchor: str = "anchor-camera"
+    grid_anchor: str = "anchor-camera-ticks"
     max_hold_fraction: float | None = None
     max_hold_run_s: float | None = None
+    max_tick_rate_deviation: float = 0.1
 
     def __post_init__(self) -> None:
         if self.fps <= 0:
             raise ValueError("fps must be positive")
+        if self.max_tick_rate_deviation < 0:
+            raise ValueError("max_tick_rate_deviation must be non-negative")
         if self.mode not in {"capture", "lerobot-loop"}:
             raise ValueError("mode must be capture or lerobot-loop")
         if self.invalid_frame_policy not in {"fail", "drop"}:
             raise ValueError("invalid_frame_policy must be fail or drop")
-        if self.action_gap_policy not in {"fail", "hold-last-command"}:
-            raise ValueError("action_gap_policy must be fail or hold-last-command")
+        if self.action_gap_policy not in {"fail", "hold-last-command", "joint-state-fill"}:
+            raise ValueError(
+                "action_gap_policy must be fail, hold-last-command or joint-state-fill"
+            )
         if self.grid_anchor not in {"anchor-camera", "anchor-camera-ticks", "first-command"}:
             raise ValueError(
                 "grid_anchor must be anchor-camera, anchor-camera-ticks or first-command"
@@ -339,14 +344,34 @@ class _RawBag:
     tolerant_parses: dict[str, int]
 
 
-def _open_reader(bag_dir: Path) -> Any:
+def open_bag_reader(bag_dir: Path, profile: RobotProfile) -> Any:
+    """Open a bag, supplying type definitions the storage backend may lack.
+
+    MCAP embeds its schemas.  rosbag2 sqlite3 (format version 5) does not --
+    the ``.db3`` holds type *names* only -- so opening one without a typestore
+    fails outright with "Bag contains no type definitions".  The profile's
+    ``message_definitions`` fill that gap for custom types; standard ROS 2
+    messages come from the bundled Humble typestore.  The default typestore is
+    consulted only when the bag has no definitions of its own, so passing it
+    never overrides a schema the bag does carry.
+    """
     try:
         from rosbags.highlevel import AnyReader
+        from rosbags.typesys import Stores, get_types_from_msg, get_typestore
     except ImportError as exc:
         raise RuntimeError("Missing dependency: pip install rosbags") from exc
-    # MCAP and rosbag2 sqlite3 both embed their schemas, so no typestore
-    # registration is needed for custom message types.
-    return AnyReader([bag_dir])
+
+    typestore = get_typestore(Stores.ROS2_HUMBLE)
+    for typename, definition in (profile.message_definitions or {}).items():
+        if typename in typestore.types:
+            continue
+        try:
+            typestore.register(get_types_from_msg(definition, typename))
+        except Exception as exc:
+            raise ConversionError(
+                f"profile {profile.name}: cannot register message definition for {typename}: {exc}"
+            ) from exc
+    return AnyReader([bag_dir], default_typestore=typestore)
 
 
 def _ensure_monotonic(name: str, timestamps: np.ndarray) -> None:
@@ -370,7 +395,7 @@ def _scan_bag(bag_dir: Path, profile: RobotProfile, cfg: AlignmentConfig) -> _Ra
     image_kinds: dict[str, str] = {}
     msgtypes: dict[str, str] = {}
 
-    reader = _open_reader(bag_dir)
+    reader = open_bag_reader(bag_dir, profile)
     reader.open()
     try:
         available = {connection.topic for connection in reader.connections}
@@ -547,7 +572,7 @@ def _decode_selected_media(
     decoded: dict[str, dict[int, np.ndarray]] = {topic: {} for topic in selected_by_topic}
     camera_topics = set(profile.cameras.values())
 
-    reader = _open_reader(raw.bag_dir)
+    reader = open_bag_reader(raw.bag_dir, raw.profile)
     reader.open()
     try:
         connections = [c for c in reader.connections if c.topic in selected_by_topic]
@@ -713,6 +738,24 @@ def align_rosbag(bag_dir: Path, profile: RobotProfile, cfg: AlignmentConfig) -> 
     if frame_count < 2:
         raise ConversionError(f"Teleoperation window produces only {frame_count} frame(s)")
 
+    # With anchor-camera ticks the row spacing is the camera's real period, but
+    # LeRobot derives its timestamp column as frame_index / fps.  If the camera
+    # does not actually run at --fps the dataset clock silently drifts, so make
+    # the mismatch an error rather than a property of the output.
+    tick_period_ms = float(np.median(np.diff(grid_ns))) / 1e6 if grid_ns.size > 1 else 0.0
+    measured_fps = 1000.0 / tick_period_ms if tick_period_ms > 0 else 0.0
+    if cfg.grid_anchor == "anchor-camera-ticks" and measured_fps > 0:
+        deviation = abs(measured_fps - cfg.fps) / cfg.fps
+        if deviation > cfg.max_tick_rate_deviation:
+            raise ConversionError(
+                f"anchor camera {profile.resolved_anchor_camera!r} ticks at "
+                f"{measured_fps:.2f} Hz but --fps is {cfg.fps} "
+                f"({100 * deviation:.1f}% off): the dataset timestamp column would not match "
+                f"the real row spacing. Set --fps {round(measured_fps)}, pick another "
+                f"--anchor-camera, or use --grid-anchor anchor-camera for a true fixed-rate grid "
+                f"(raise --max-tick-rate-deviation to accept the mismatch)."
+            )
+
     arm_period_ms = (
         float(np.median(np.diff(raw.arm_t))) / 1e6 if raw.arm_t.size > 1 else 1000.0 / cfg.fps
     )
@@ -798,13 +841,26 @@ def align_rosbag(bag_dir: Path, profile: RobotProfile, cfg: AlignmentConfig) -> 
     )
     command_skew = selected_cmd_times.max(axis=0) - selected_cmd_times.min(axis=0)
     all_real = np.logical_and.reduce([real_masks[t] for t in profile.arm.command_topics])
+    any_real = np.logical_or.reduce([real_masks[t] for t in profile.arm.command_topics])
     # Skew only means anything when every arm has a genuine command this tick.
     pair_valid = ~all_real | (command_skew <= pair_tol)
     if cfg.action_gap_policy == "fail":
         valid_parts["command_pair_skew"] = pair_valid
-    hold_mask = ~(all_real & pair_valid)
+    if cfg.action_gap_policy == "joint-state-fill":
+        # Arms are teleoperated independently here, so a row still carries real
+        # intent when any arm was commanded; requiring all of them would mask
+        # out every row of a single-arm episode.  Per-arm detail stays in
+        # audit.hold.joint_state_fill_rows.
+        hold_mask = ~any_real
+    else:
+        hold_mask = ~(all_real & pair_valid)
 
-    if cfg.action_gap_policy != "fail" and not all_real.any():
+    if cfg.action_gap_policy == "joint-state-fill":
+        # A silent arm is filled from its own measured state, so an episode is
+        # usable as long as *some* arm was genuinely teleoperated.
+        if not any_real.any():
+            raise ConversionError("Episode contains no genuine teleop command rows on any arm")
+    elif cfg.action_gap_policy != "fail" and not all_real.any():
         raise ConversionError("Episode contains no genuine teleop command rows")
 
     # -- end-effector action --------------------------------------------
@@ -845,17 +901,33 @@ def align_rosbag(bag_dir: Path, profile: RobotProfile, cfg: AlignmentConfig) -> 
     command_skew = keep(command_skew)
     hold_mask = keep(hold_mask)
     all_real = keep(all_real)
+    any_real = keep(any_real)
     image_indices = {name: keep(indices) for name, indices in image_indices.items()}
     depth_indices = {name: keep(indices) for name, indices in depth_indices.items()}
 
     # -- assemble state / action ----------------------------------------
+    # Each command topic drives a fixed slice of the arm, in declaration order:
+    # topic i owns joint_names[i * command_dim : (i + 1) * command_dim].  That
+    # mapping is enforced by ArmSpec, so a silent arm can be filled from its own
+    # measured joints without guessing which columns belong to it.
+    arm_blocks: list[np.ndarray] = []
+    joint_state_fill_rows: dict[str, int] = {}
+    for position, topic in enumerate(profile.arm.command_topics):
+        block = raw.cmd_v[topic][keep(cmd_indices[topic])]
+        if cfg.action_gap_policy == "joint-state-fill":
+            filled = ~keep(real_masks[topic])
+            if filled.any():
+                start = position * profile.arm.command_dim
+                stop = start + profile.arm.command_dim
+                block = block.copy()
+                # Older recordings drop joint_cmd while the arm is still held in
+                # place by the controller; its measured position is then the
+                # only honest statement of the commanded pose.
+                block[filled] = arm_qpos[filled, start:stop]
+            joint_state_fill_rows[topic] = int(filled.sum())
+        arm_blocks.append(block)
     qpos_parts: list[np.ndarray] = [arm_qpos]
-    action_parts: list[np.ndarray] = [
-        np.concatenate(
-            [raw.cmd_v[topic][keep(cmd_indices[topic])] for topic in profile.arm.command_topics],
-            axis=1,
-        )
-    ]
+    action_parts: list[np.ndarray] = [np.concatenate(arm_blocks, axis=1)]
     for effector in profile.end_effectors:
         qpos_parts.append(keep(effector_state[effector.name]))
         action_parts.append(keep(effector_action[effector.name]))
@@ -929,6 +1001,9 @@ def align_rosbag(bag_dir: Path, profile: RobotProfile, cfg: AlignmentConfig) -> 
         "grid_anchor": cfg.grid_anchor,
         "action_gap_policy": cfg.action_gap_policy,
         "fps": cfg.fps,
+        # Actual row spacing: equals fps for fixed-rate grids, and the anchor
+        # camera's real rate for anchor-camera-ticks.
+        "measured_tick_hz": measured_fps,
         "candidate_frames": frame_count,
         "output_frames": int(qpos.shape[0]),
         "dropped_frames": int(frame_count - qpos.shape[0]),
@@ -949,6 +1024,11 @@ def align_rosbag(bag_dir: Path, profile: RobotProfile, cfg: AlignmentConfig) -> 
             "max_run_s": max_hold_run_s,
             "segments": hold_segments,
             "real_command_rows": int(all_real.sum()),
+            "any_arm_real_command_rows": int(any_real.sum()),
+            # Per arm: rows whose action came from measured joints rather than a
+            # command.  Those columns are an identity copy of the observation,
+            # so training should treat them via action_hold_mask.
+            "joint_state_fill_rows": joint_state_fill_rows,
         },
         "unique_ratio": {
             **{f"image_{name}": unique_ratio(indices) for name, indices in image_indices.items()},
