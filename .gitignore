@@ -20,11 +20,14 @@
 /test_lerobot/videos/
 *.npz
 *.hdf5
+*.mcap
 
 artifacts/
 
 .vscode/
 CLAUDE.md
+
+SDK_PYTHON/
 
 dataset/
 datasets/

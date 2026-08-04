@@ -14,10 +14,6 @@ import numpy as np
 from conversion_common import AlignedEpisode, ConversionError
 
 
-ARM_NAMES = [f"Joint{i}_{side}" for side in ("L", "R") for i in range(1, 8)]
-STATE_NAMES = [*ARM_NAMES, "gripper_L", "gripper_R"]
-
-
 @dataclass(frozen=True)
 class RGBVideoConfig:
     codec: str = "h264"
@@ -76,19 +72,27 @@ def episode_features(
     include_velocity: bool,
     include_depth: bool,
 ) -> dict[str, dict[str, Any]]:
+    state_names = list(episode.state_names)
+    state_dim = episode.state_dim
+    if not state_names:
+        state_names = [f"state_{index}" for index in range(state_dim)]
+    if len(state_names) != state_dim:
+        raise ConversionError(
+            f"{len(state_names)} state names for {state_dim} state dimensions"
+        )
     features: dict[str, dict[str, Any]] = {
         "observation.state": {
             "dtype": "float32",
-            "shape": (16,),
-            "names": STATE_NAMES,
+            "shape": (state_dim,),
+            "names": state_names,
         },
-        "action": {"dtype": "float32", "shape": (16,), "names": STATE_NAMES},
+        "action": {"dtype": "float32", "shape": (state_dim,), "names": state_names},
     }
     if include_velocity:
         features["observation.velocity"] = {
             "dtype": "float32",
-            "shape": (16,),
-            "names": STATE_NAMES,
+            "shape": (state_dim,),
+            "names": state_names,
         }
     visual_dtype = "video" if use_videos else "image"
     for name, images in episode.images.items():
@@ -117,12 +121,13 @@ def assert_episode_schema(
     include_velocity: bool,
     include_depth: bool,
 ) -> None:
-    if episode.qpos.shape != (episode.frame_count, 16):
-        raise ConversionError(f"qpos shape invalid: {episode.qpos.shape}")
-    if episode.action.shape != (episode.frame_count, 16):
-        raise ConversionError(f"action shape invalid: {episode.action.shape}")
-    if include_velocity and episode.qvel.shape != (episode.frame_count, 16):
-        raise ConversionError(f"qvel shape invalid: {episode.qvel.shape}")
+    expected = tuple(features["observation.state"]["shape"])
+    if episode.qpos.shape != (episode.frame_count, *expected):
+        raise ConversionError(f"qpos shape invalid: {episode.qpos.shape}, expected (T, {expected[0]})")
+    if episode.action.shape != (episode.frame_count, *expected):
+        raise ConversionError(f"action shape invalid: {episode.action.shape}, expected (T, {expected[0]})")
+    if include_velocity and episode.qvel.shape != (episode.frame_count, *expected):
+        raise ConversionError(f"qvel shape invalid: {episode.qvel.shape}, expected (T, {expected[0]})")
     for name, images in episode.images.items():
         expected = tuple(features[f"observation.images.{name}"]["shape"])
         if images.shape[1:] != expected or images.dtype != np.uint8:
@@ -152,7 +157,7 @@ def create_dataset(
     repo_id: str,
     root: Path,
     episode: AlignedEpisode,
-    robot_type: str,
+    robot_type: str | None,
     use_videos: bool,
     include_velocity: bool,
     include_depth: bool,
@@ -171,7 +176,7 @@ def create_dataset(
         repo_id=repo_id,
         root=root,
         fps=episode.fps,
-        robot_type=robot_type,
+        robot_type=robot_type or episode.robot_type,
         features=features,
         use_videos=use_videos,
         image_writer_processes=image_writer_processes,
