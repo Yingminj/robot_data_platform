@@ -531,6 +531,9 @@ def _list_local_checkpoints(output_dir: str) -> list[JobCheckpoint]:
 
 _CLOUD_CKPT_TTL_SECONDS = 30.0
 _CKPT_PATH_RE = re.compile(r"^checkpoints/(\d+)/pretrained_model/config\.json$")
+# lerobot.constants.TRAIN_CONFIG_NAME, inlined so this module stays importable
+# without lerobot (the tests and the cluster Web process do not install it).
+_TRAIN_CONFIG_NAME = "train_config.json"
 
 
 def _hub_checkpoints_from_files(files, repo_id: str) -> list[JobCheckpoint]:
@@ -979,10 +982,22 @@ class JobRegistry:
                 raise JobAlreadyRunningError(job_id)
             if record.runner != "slurm":
                 raise ValueError("Only Slurm jobs can be resumed on the cluster")
-            if not _list_local_checkpoints(record.output_dir):
+            checkpoints = _list_local_checkpoints(record.output_dir)
+            if not checkpoints:
                 raise ValueError(f"Job {job_id!r} has no complete checkpoint")
 
-            record.config = record.config.model_copy(update={"resume": True})
+            # LeRobot restores a resumed run from the checkpoint's own train_config.json;
+            # --resume without --config_path is rejected in validate().
+            newest = max(checkpoints, key=lambda item: item.step)
+            train_config = Path(newest.ref) / _TRAIN_CONFIG_NAME
+            if not train_config.is_file():
+                raise ValueError(
+                    f"Checkpoint {newest.step} of job {job_id!r} has no {_TRAIN_CONFIG_NAME}"
+                )
+
+            record.config = record.config.model_copy(
+                update={"resume": True, "config_path": str(train_config)}
+            )
             record.state = "running"
             record.started_at = time.time()
             record.ended_at = None

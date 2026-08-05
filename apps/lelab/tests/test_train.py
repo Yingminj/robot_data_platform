@@ -158,7 +158,9 @@ def test_cloud_resume_omits_save_checkpoint_to_hub() -> None:
 
     # On a cloud resume, submit_to_hf never sets policy.repo_id before validate(), so
     # --save_checkpoint_to_hub would abort the submit. It must be suppressed.
-    req = TrainingRequest(dataset_repo_id="x", save_checkpoint=True, resume=True)
+    req = TrainingRequest(
+        dataset_repo_id="x", save_checkpoint=True, resume=True, config_path="me/model"
+    )
     cmd = build_training_command(
         req, "/tmp/out", job_target=JobTarget(runner="hf_cloud", flavor="a10g-small")
     )

@@ -108,6 +108,16 @@ def build_training_command(
     PATH lookup picks up a different env (uv tool venv, miniforge3 base, etc.)
     that lacks lerobot.
     """
+    # LeRobot rebuilds a resumed run from the checkpoint's train_config.json rather
+    # than from the flags below, and rejects --resume on its own. Refusing here gives
+    # the caller the reason immediately instead of a job that dies inside validate().
+    if request.resume and not request.config_path:
+        raise ValueError(
+            "Resuming requires config_path (a checkpoint's train_config.json, or a Hub "
+            "repo id). Use the job's Resume action, which fills it in from the newest "
+            "checkpoint."
+        )
+
     cmd: list[str] = [python_executable, "-m", "lerobot.scripts.lerobot_train"]
 
     # Dataset

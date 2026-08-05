@@ -183,7 +183,17 @@ class SlurmJobRunner:
 
     @staticmethod
     def _batch_script(command: list[str]) -> str:
-        """Build a fixed script and re-check out-of-band CUDA use on-node."""
+        """Build a fixed script and re-check out-of-band CUDA use on-node.
+
+        Slurm sets ``HOME`` from the job user's passwd entry, but that home
+        need not exist on a worker: ``robot-train`` is a ``nologin`` service
+        account and only the management host creates its home. Anything that
+        caches under ``~`` then dies on the worker — torchvision downloading
+        pretrained backbone weights is the first thing to try, wandb staging
+        an artifact at the first checkpoint is the second. Pin those caches to
+        a directory that does exist on every node, and redirect ``HOME``
+        itself when it is unusable so libraries that ignore XDG still work.
+        """
 
         command_line = shlex.join(command)
         return (
@@ -204,6 +214,21 @@ class SlurmJobRunner:
             "  fi\n"
             "fi\n"
             "export PYTHONUNBUFFERED=1\n"
+            'cache_root="${LELAB_JOB_CACHE_ROOT:-${HF_HOME:-}}"\n'
+            'if [ -n "$cache_root" ]; then\n'
+            '  export HF_HOME="${HF_HOME:-$cache_root/huggingface}"\n'
+            '  export TORCH_HOME="${TORCH_HOME:-$cache_root/torch}"\n'
+            '  export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$cache_root/xdg/cache}"\n'
+            '  export XDG_DATA_HOME="${XDG_DATA_HOME:-$cache_root/xdg/data}"\n'
+            '  export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$cache_root/xdg/config}"\n'
+            '  if [ ! -w "${HOME:-}" ]; then export HOME="$cache_root/home"; fi\n'
+            '  if ! mkdir -p "$HF_HOME" "$TORCH_HOME" "$XDG_CACHE_HOME" '
+            '"$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$HOME"; then\n'
+            "    echo \"Cannot create the job cache under '$cache_root' on $(hostname);\" >&2\n"
+            '    echo "set LELAB_JOB_CACHE_ROOT to a path writable on every worker." >&2\n'
+            "    exit 1\n"
+            "  fi\n"
+            "fi\n"
             f"exec {command_line}\n"
         )
 

@@ -80,3 +80,74 @@ def test_slurm_batch_script_rechecks_gpu_before_training() -> None:
     assert "--query-compute-apps=pid" in script
     assert "exit 75" in script
     assert "exec python -m trainer" in script
+
+
+def test_slurm_batch_script_redirects_caches_away_from_home(tmp_path) -> None:
+    """The job user's home need not exist on the worker; caches must not use it."""
+
+    import os
+    import subprocess as sp
+
+    from lelab.runners.slurm import SlurmJobRunner
+
+    cache_root = tmp_path / "cache"
+    script_path = tmp_path / "job.sbatch"
+    script_path.write_text(SlurmJobRunner._batch_script(["env"]))
+
+    # Stub nvidia-smi so the GPU precheck stays out of this test.
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    (stub_dir / "nvidia-smi").write_text("#!/bin/sh\nexit 0\n")
+    (stub_dir / "nvidia-smi").chmod(0o755)
+
+    env = {
+        **os.environ,
+        "HOME": "/nonexistent/robot-train",
+        "LELAB_JOB_CACHE_ROOT": str(cache_root),
+        "PATH": f"{stub_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+    }
+    for name in ("HF_HOME", "TORCH_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME"):
+        env.pop(name, None)
+    result = sp.run(["bash", str(script_path)], env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert f"TORCH_HOME={cache_root}/torch" in result.stdout
+    assert f"HF_HOME={cache_root}/huggingface" in result.stdout
+    assert f"XDG_CACHE_HOME={cache_root}/xdg/cache" in result.stdout
+    # wandb resolves its staging dir through platformdirs, which reads XDG_DATA_HOME.
+    assert f"XDG_DATA_HOME={cache_root}/xdg/data" in result.stdout
+    assert f"XDG_CONFIG_HOME={cache_root}/xdg/config" in result.stdout
+    # Libraries that hardcode ~ need a home that exists, not just XDG overrides.
+    assert f"HOME={cache_root}/home" in result.stdout
+    assert (cache_root / "torch").is_dir()
+    assert (cache_root / "home").is_dir()
+
+
+def test_slurm_batch_script_keeps_a_writable_home(tmp_path) -> None:
+    """A worker that does have the home directory should keep using it."""
+
+    import os
+    import subprocess as sp
+
+    from lelab.runners.slurm import SlurmJobRunner
+
+    home = tmp_path / "home"
+    home.mkdir()
+    script_path = tmp_path / "job.sbatch"
+    script_path.write_text(SlurmJobRunner._batch_script(["env"]))
+
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    (stub_dir / "nvidia-smi").write_text("#!/bin/sh\nexit 0\n")
+    (stub_dir / "nvidia-smi").chmod(0o755)
+
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "LELAB_JOB_CACHE_ROOT": str(tmp_path / "cache"),
+        "PATH": f"{stub_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+    }
+    result = sp.run(["bash", str(script_path)], env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert f"HOME={home}\n" in result.stdout

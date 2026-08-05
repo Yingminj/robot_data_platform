@@ -271,3 +271,43 @@ def test_register_imported_hub_repo(monkeypatch, tmp_path) -> None:
     assert rec.output_dir == ""
     cks = reg.list_checkpoints(rec.id)
     assert [c.ref for c in cks] == ["user/some-model@root"]
+
+
+def test_resume_points_lerobot_at_the_newest_checkpoint_config(tmp_path, monkeypatch) -> None:
+    """LeRobot rebuilds a resumed run from train_config.json; --resume alone is rejected."""
+
+    from lelab.jobs import JobRecord, JobRegistry
+    from lelab.runners import slurm
+    from lelab.train import TrainingRequest
+
+    output_dir = tmp_path / "job" / "run"
+    for step in (10, 20):
+        checkpoint = output_dir / "checkpoints" / f"{step:06d}" / "pretrained_model"
+        _make_pretrained(checkpoint)
+        (checkpoint / "train_config.json").write_text(_json.dumps({"steps": 100}))
+
+    reg = JobRegistry(tmp_path / "root")
+    reg._records["j1"] = JobRecord(
+        id="j1",
+        name="j1",
+        state="failed",
+        config=TrainingRequest(dataset_repo_id="x"),
+        output_dir=str(output_dir),
+        started_at=0.0,
+        runner="slurm",
+    )
+
+    started: dict = {}
+    monkeypatch.setattr(
+        slurm.SlurmJobRunner,
+        "start",
+        lambda self, job_id, config, out_dir: started.update(config=config),
+    )
+    monkeypatch.setattr(slurm.SlurmJobRunner, "slurm_job_id", lambda self: "42")
+    monkeypatch.setattr(slurm.SlurmJobRunner, "node_name", lambda self: "gpu01")
+
+    reg.resume("j1")
+
+    assert started["config"].resume is True
+    expected = output_dir / "checkpoints" / "000020" / "pretrained_model" / "train_config.json"
+    assert started["config"].config_path == str(expected.resolve())

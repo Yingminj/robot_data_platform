@@ -36,6 +36,11 @@ install -d -o root -g root -m 0755 /opt/robot-platform
 "${TRAIN_ENV_ROOT}/bin/pip" install \
   "lerobot[core_scripts,training,smolvla,pi] @ git+${lerobot_git_url}@${LEROBOT_GIT_REF}"
 
+# Slurm sets HOME from ${TRAIN_USER}'s passwd entry, but that home exists only
+# where an installer created it. Training jobs cache torch hub backbone weights
+# and Hugging Face artifacts here instead, so every worker has a writable cache.
+safe_install_dir "${PLATFORM_STATE_ROOT}/cache" "${TRAIN_USER}" "${DATA_GROUP}" 0750
+
 chown -R "${TRAIN_USER}:${DATA_GROUP}" "${TRAIN_ENV_ROOT}"
 runuser -u "${TRAIN_USER}" -- "${TRAIN_ENV_ROOT}/bin/python" -c \
   "import torch; assert torch.cuda.is_available(), 'PyTorch cannot access CUDA'; import lerobot"
