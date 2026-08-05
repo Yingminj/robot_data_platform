@@ -1,0 +1,107 @@
+{
+  "source_raw_bag": "/home/kewei/YING/robot_data_platform/dataset/new_mcap_recorded_data/express_raw/my_bag-26-08-05-11-01-38/data",
+  "reference_jpeg80_bags": "/home/kewei/YING/robot_data_platform/dataset/new_mcap_recorded_data/express_mcap",
+  "profile": "/home/kewei/YING/robot_data_platform/tool/profiles/marvin-gripper-quadtile.json",
+  "profile_jpeg80": "/home/kewei/YING/robot_data_platform/test_raw_jpeg/profiles/marvin-gripper-quadtile-compressed.json",
+  "task": "express",
+  "repo_id": "local/express",
+  "fps": 30,
+  "alignment": {
+    "mode": "lerobot-loop",
+    "grid_anchor": "anchor-camera-ticks",
+    "state_tolerance_ms": 20.0,
+    "action_gap_policy": "hold-last-command"
+  },
+  "mosaic": {
+    "width": 1280,
+    "height": 1440,
+    "note": "realsense hero3 layout; head tile stored 2x upscaled, wrists native"
+  },
+  "cameras": [
+    "top",
+    "wrist_L",
+    "wrist_R"
+  ],
+  "jpeg": {
+    "encoder": "cv2.imencode('.jpg', BGR_mosaic, [IMWRITE_JPEG_QUALITY, q])",
+    "matches": "Apex_Deploy_new/components/realsense/src/realsense_node.cpp:333",
+    "production_quality": 80,
+    "levels": [
+      100,
+      80
+    ],
+    "bag_levels": [
+      100,
+      80
+    ]
+  },
+  "video": {
+    "note": "settings taken from tool/lerobot_v3_common.py RGBVideoConfig, which is what rosbag2_to_lerobotv3.py hands to LeRobot",
+    "codec": "h264",
+    "pix_fmt": "yuv420p",
+    "gop": 2,
+    "preset": null,
+    "fast_decode": 0,
+    "crf_levels": [
+      0,
+      20,
+      30
+    ]
+  },
+  "sources": {
+    "raw": "uncompressed /quad_tile sensor_msgs/Image, ground truth",
+    "jpeg100": "same frames at JPEG q100 -- 'compressed at record time, but barely'",
+    "jpeg80": "same frames at the production JPEG quality, then converted"
+  },
+  "feature_evaluation": {
+    "_comment": "Copied verbatim from test_lerobot/config.json so the two reports' cosines are directly comparable.",
+    "resize_size": 256,
+    "crop_size": 224,
+    "variants": {
+      "jpeg_q100": "jpeg100",
+      "jpeg_q80": "jpeg80",
+      "raw_crf0": "vid_raw_crf0",
+      "raw_crf20": "vid_raw_crf20",
+      "raw_crf30": "vid_raw_crf30",
+      "jpeg100_crf0": "vid_jpeg100_crf0",
+      "jpeg100_crf20": "vid_jpeg100_crf20",
+      "jpeg100_crf30": "vid_jpeg100_crf30",
+      "jpeg80_crf0": "vid_jpeg80_crf0",
+      "jpeg80_crf20": "vid_jpeg80_crf20",
+      "jpeg80_crf30": "vid_jpeg80_crf30"
+    },
+    "pca_frame_index": 550,
+    "models": [
+      {
+        "id": "dinov3_vits16",
+        "display_name": "DINOv3 ViT-S/16",
+        "family": "DINOv3",
+        "repo": "/home/kewei/YING/dinov3",
+        "entrypoint": "dinov3_vits16",
+        "checkpoint": "/home/kewei/YING/dinov3/dino_ckpt/dinov3_vits16_pretrain_lvd1689m-08c60483.pth",
+        "patch_size": 16,
+        "batch_size": 8
+      },
+      {
+        "id": "dinov3_vitb16",
+        "display_name": "DINOv3 ViT-B/16",
+        "family": "DINOv3",
+        "repo": "/home/kewei/YING/dinov3",
+        "entrypoint": "dinov3_vitb16",
+        "checkpoint": "/home/kewei/YING/dinov3/dino_ckpt/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth",
+        "patch_size": 16,
+        "batch_size": 4
+      },
+      {
+        "id": "dinov2_vits14",
+        "display_name": "DINOv2 ViT-S/14",
+        "family": "DINOv2",
+        "repo": "/home/kewei/.cache/torch/hub/facebookresearch_dinov2_main",
+        "entrypoint": "dinov2_vits14",
+        "checkpoint": "/home/kewei/.cache/torch/hub/checkpoints/dinov2_vits14_pretrain.pth",
+        "patch_size": 14,
+        "batch_size": 8
+      }
+    ]
+  }
+}

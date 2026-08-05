@@ -1,0 +1,39 @@
+{
+  "name": "mcap-dexhand",
+  "storage": "mcap",
+  "description": "MCAP dexterous-hand rig: /tj-prefixed arm topics, per-camera compressed cameras",
+
+  "_comment": [
+    "FREQUENTLY TUNED: the video block below; an explicit CLI flag always wins.",
+    "",
+    "The other dexhand generation -- legacy /joint_states topic names, raw Image",
+    "cameras -- is the marvin-dexhand profile; use --profile marvin-dexhand with this",
+    "recipe's alignment settings, or --profile marvin-dexhand-head for the head-only",
+    "recordings."
+  ],
+  "video": {
+    "codec": "h264",
+    "crf": 20,
+    "gop": 2,
+    "pixel_format": "yuv420p"
+  },
+
+  "profile": "tj-dexhand",
+  "alignment": {
+    "fps": 30,
+    "mode": "lerobot-loop",
+    "grid_anchor": "anchor-camera-ticks",
+    "action_gap_policy": "hold-last-command",
+    "missing_topic_policy": "fail",
+    "invalid_frame_policy": "fail",
+    "max_decode_errors": 0,
+    "max_tick_rate_deviation": 0.1
+  },
+
+  "notes": [
+    "state_dim is 54: 14 arm joints plus 20 DoF per hand. A gripper batch is 16, so",
+    "a dexhand and a gripper batch can never share one LeRobot dataset.",
+    "/hand_left/joint_states is absent in this generation, so the left hand's",
+    "observation is a command echo -- audit.end_effector_state_source records it."
+  ]
+}

@@ -1,0 +1,81 @@
+{
+  "name": "marvin-gripper-percam",
+  "robot_type": "marvin",
+  "_comment": [
+    "Gripper rig recorded with one compressed topic per camera instead of the",
+    "stitched /quad_tile mosaic, and with gripper feedback on /info/gripper_feedback_*",
+    "rather than /gripper/feedback_*. This is the layout to prefer when recording:",
+    "each camera keeps its native resolution and its own capture stamp, both of",
+    "which the mosaic destroys.",
+    "",
+    "The feedback topic publishes a 5-component Float32MultiArray whose meaning is",
+    "positional -- component 0 is the measured opening, the rest are velocity,",
+    "current and two temperatures -- so state_indices names the index rather than",
+    "relying on the (empty) MultiArray dimension labels.",
+    "",
+    "Recordings in this generation sometimes omit /control/gripperValue* entirely.",
+    "Convert those with --missing-topic-policy fill, which reconstructs the gripper",
+    "command from the measured feedback; the recipe mcap-gripper-percam does this."
+  ],
+  "arm": {
+    "joint_states_topic": "/joint_states",
+    "joint_names": [
+      "Joint1_L",
+      "Joint2_L",
+      "Joint3_L",
+      "Joint4_L",
+      "Joint5_L",
+      "Joint6_L",
+      "Joint7_L",
+      "Joint1_R",
+      "Joint2_R",
+      "Joint3_R",
+      "Joint4_R",
+      "Joint5_R",
+      "Joint6_R",
+      "Joint7_R"
+    ],
+    "command_topics": [
+      "/control/joint_cmd_A",
+      "/control/joint_cmd_B"
+    ],
+    "command_dim": 7
+  },
+  "end_effectors": [
+    {
+      "name": "L",
+      "kind": "gripper",
+      "dim": 1,
+      "command_topic": "/control/gripperValueL",
+      "command_kind": "float32",
+      "state_topic": "/info/gripper_feedback_L",
+      "state_kind": "float32multiarray",
+      "state_indices": [
+        0
+      ]
+    },
+    {
+      "name": "R",
+      "kind": "gripper",
+      "dim": 1,
+      "command_topic": "/control/gripperValueR",
+      "command_kind": "float32",
+      "state_topic": "/info/gripper_feedback_R",
+      "state_kind": "float32multiarray",
+      "state_indices": [
+        0
+      ]
+    }
+  ],
+  "cameras": {
+    "top": "/head_camera/camera/color/image_raw/compressed",
+    "wrist_L": "/wrist_left_camera/camera/color/image_raw/compressed",
+    "wrist_R": "/wrist_right_camera/camera/color/image_raw/compressed"
+  },
+  "depths": {},
+  "anchor_camera": "top",
+  "message_definitions": {
+    "marvin_msgs/msg/Jointcmd": "std_msgs/Header header\nfloat64[7] positions\n",
+    "marvin_msgs/msg/JointcmdArm": "std_msgs/Header header\nfloat64[7] positions\n"
+  }
+}

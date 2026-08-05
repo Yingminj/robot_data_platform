@@ -1,0 +1,43 @@
+{
+  "name": "mcap-gripper-percam",
+  "storage": "mcap",
+  "description": "MCAP gripper rig with one compressed topic per camera and /info/gripper_feedback_*",
+
+  "_comment": [
+    "FREQUENTLY TUNED: the video block below; an explicit CLI flag always wins.",
+    "",
+    "This is the layout to prefer when recording: each camera keeps its native",
+    "resolution and its own capture stamp, both of which the /quad_tile mosaic",
+    "destroys. Recordings in this generation have been seen without",
+    "/control/gripperValue* at all, so missing_topic_policy is fill -- the gripper",
+    "command is then reconstructed from its measured feedback."
+  ],
+  "video": {
+    "codec": "h264",
+    "crf": 20,
+    "gop": 2,
+    "pixel_format": "yuv420p"
+  },
+
+  "profile": "marvin-gripper-percam",
+  "alignment": {
+    "fps": 30,
+    "mode": "lerobot-loop",
+    "grid_anchor": "anchor-camera-ticks",
+    "action_gap_policy": "joint-state-fill",
+    "missing_topic_policy": "fill",
+    "invalid_frame_policy": "fail",
+    "max_decode_errors": 0,
+    "max_tick_rate_deviation": 0.1
+  },
+
+  "notes": [
+    "missing_topic_policy fill reconstructs an absent gripper command from the",
+    "measured feedback, which makes those action columns an identity copy of the",
+    "observation. Check audit.end_effector_action_source in the manifest: entries",
+    "reading state_fill teach the policy nothing about the gripper, so confirm the",
+    "gripper really was parked before training on such a batch.",
+    "Three cameras are required. Head-only recordings in this generation need their",
+    "own profile and therefore their own dataset."
+  ]
+}

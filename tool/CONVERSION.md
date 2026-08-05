@@ -24,32 +24,131 @@ MCAP 自带 schema；**rosbag2 sqlite3（format version 5）不带**，`.db3` �
 标准 ROS 2 消息来自内置 Humble typestore。该 typestore 只在 bag 自身没有定义时才被使用，
 所以对 MCAP 不会产生任何覆盖。
 
+## 目录结构
+
+```text
+tool/
+├── rdp                          # 唯一入口，见「命令」一节
+├── robot_data/
+│   ├── errors.py  progress.py  discovery.py     叶子工具
+│   ├── profiles/     schema.py + builtin/*.json 机器人是什么
+│   ├── ros/          cdr.py  media.py           消息解码
+│   ├── align/        bag_io / window / aligner  对齐核心
+│   ├── writers/      hdf5.py  lerobot_v3.py     输出
+│   ├── qc/           rosbag.py hdf5.py inventory.py  体检
+│   ├── recipes/      *.json + loader.py         按数据格式预设
+│   └── cli/          args.py + 每个子命令一个模块
+└── scripts/          check_rosbag.sh  convert_batches.sh
+```
+
+依赖方向自上而下，没有回边：`align` 用得到 `profiles` 和 `ros`，反过来不行。
+
+## 命令
+
+全部功能都在 `tool/rdp` 一个入口下：
+
+| 命令 | 作用 |
+|---|---|
+| `rdp recipes` / `rdp profiles` | 列出配方 / profile 及其话题、维度 |
+| `rdp check-rosbag <bag>` | 体检 `.db3` / `.mcap`，先看话题对不对得上 |
+| `rdp check-hdf5 <路径>` | 体检 HDF5，含来源话题 |
+| `rdp convert` | rosbag2 → LeRobotDataset v3（训练走这条） |
+| `rdp export-hdf5` | rosbag2 → 对齐 HDF5（归档 / ACT 兼容） |
+| `rdp convert-hdf5` | HDF5 → LeRobotDataset v3 |
+| `rdp upload` | 数据集分批上传 Hugging Face |
+
+```bash
+conda run -n lerobot tool/rdp <命令> [参数]
+```
+
+## 转换配方（recipe）
+
+配方把「这批数据是怎么录的」一次性写清楚：用哪个 profile、相机话题是哪个拼法、
+对齐要多宽松、视频默认怎么编。没有配方时这些参数每批都要重敲一遍，
+而相机话题最后往往被手工改进 profile 里——profile 和录制就是这样走散的。
+
+优先级由低到高：**内置默认值 < 配方 < 命令行显式参数**。
+
+| 配方 | 存储 | profile | 相机话题 | 对齐 |
+|---|---|---|---|---|
+| `mcap-gripper-quadtile` | mcap | `marvin-gripper-quadtile` | `/quad_tile/compressed` | 默认（严格） |
+| `mcap-gripper-quadtile-raw` | mcap | 同上 | `/quad_tile`（raw Image） | 默认（严格） |
+| `mcap-gripper-percam` | mcap | `marvin-gripper-percam` | 每相机一个 compressed 话题 | 允许重建缺失夹爪指令 |
+| `mcap-dexhand` | mcap | `tj-dexhand` | 每相机一个 compressed 话题 | 默认（严格） |
+| `db3-gripper` | sqlite3 | `marvin-gripper` | 每相机一个 raw 话题 | 宽松，见下 |
+| `db3-dexhand` | sqlite3 | `marvin-dexhand` | 每相机一个 raw 话题 | 宽松，见下 |
+
+```bash
+# 用配方
+conda run -n lerobot tool/rdp convert --recipe mcap-gripper-quadtile \
+  --input /path/to/rosbags --output /path/to/my_dataset --task "pick up the object"
+
+# 覆盖最常调的两个参数；配方的其余设置保持不变
+conda run -n lerobot tool/rdp convert --recipe mcap-gripper-quadtile \
+  --crf 28 --video-codec libsvtav1 --input ... --output ...
+
+# 看某个配方到底是什么
+tool/rdp recipes mcap-gripper-quadtile
+```
+
+配方文件在 `tool/robot_data/recipes/*.json`，每个文件把最常改的 `video` 块放在最前面。
+自定义配方写一个 JSON、用 `--recipe /path/to/my.json` 引用即可。
+
+实际用到的配方会原样写进数据集的 `meta/conversion_manifest.json`，
+所以一份数据集永远能说清自己是用什么设置转出来的。
+
+### `.db3` 为什么要宽松
+
+旧 `.db3` 一代掉帧严重，且遥操作逻辑会让一条手臂整段没有 `joint_cmd`，
+严格默认值下几乎每个 episode 都会被拒。两个 db3 配方因此放宽：
+
+```text
+action_gap_policy    joint-state-fill   断档时用该臂实测关节填充动作
+missing_topic_policy fill               整段缺失的指令话题同样重建
+invalid_frame_policy drop               越界的行丢弃而不是判整段失败
+max_decode_errors    50
+max_tick_rate_deviation 0.25            接受锚点相机 22.5–37.5 Hz
+image_tolerance_ms   150.0              默认值的 3 倍
+state_tolerance_periods 4.5             默认 1.5 个 joint_states 周期的 3 倍
+end_effector_tolerance_ms 300.0
+max_hold_fraction    0.6                仍然拒绝「基本没在动」的 episode
+```
+
+**每一条都有代价**：填充出来的动作列与 observation 完全相同，只教会策略"保持当前姿态"。
+`audit.hold.joint_state_fill_rows`、`audit.missing_topics`、`audit.dropped_frames`
+会逐项记账，数据集里的 `timestamps/action_hold_mask` 可以在训练时降权。
+这组数值是起点不是实测结论——跑过 `rdp check-rosbag` 拿到真实丢帧率后应当收紧。
+
 ## Robot profile
 
-`tool/robot_profile.py` 用声明式配置描述"机器人是什么"：话题名、末端执行器类型与自由度、相机映射。
-内置四个 profile：
+`tool/robot_data/profiles/builtin/*.json` 用声明式配置描述"机器人是什么"：
+话题名、末端执行器类型与自由度、相机映射。没有任何 profile 写在 Python 里，
+新增一个只是多一个 JSON 文件。内置六个：
 
 | profile | 手臂话题 | 图像 | 相机 | 末端执行器 | state_dim |
 |---|---|---|---|---|---|
 | `marvin-gripper` | `/joint_states`, `/control/joint_cmd_A\|B` | `sensor_msgs/Image` | 3 | `gripper` × 2（各 1 维，`std_msgs/Float32`） | 16 |
 | `marvin-dexhand` | 同上 | `sensor_msgs/Image` | 3（`/camera/camera`, `/wrist_*`） | `dexhand` × 2（各 20 维，`JointState`） | 54 |
 | `marvin-dexhand-head` | 同上 | `sensor_msgs/Image` | 1（仅 `/camera/camera`） | `dexhand` × 2 | 54 |
-| `tj-dexhand`（默认） | `/tj/joint_states`, `/tj/control/joint_cmd_A\|B` | `CompressedImage`（JPEG） | 3（`/head_camera`, `/wrist_*_camera`） | `dexhand` × 2 | 54 |
+| `tj-dexhand`（默认） | `/joint_states`, `/tj/control/joint_cmd_A\|B` | `CompressedImage`（JPEG） | 3（`/head_camera`, `/wrist_*_camera`） | `dexhand` × 2 | 54 |
+| `marvin-gripper-quadtile` | `/joint_states`, `/control/joint_cmd_A\|B` | 拼接图 | 3（同一个 `/quad_tile*` 话题） | `gripper` × 2 | 16 |
+| `marvin-gripper-percam` | 同上 | `CompressedImage` | 3（每相机一个话题） | `gripper` × 2，`/info/gripper_feedback_*` 反馈 | 16 |
 
-另有 `tool/profiles/marvin-gripper-quadtile.json`（非内置，按路径引用）：手臂/夹爪与 `marvin-gripper`
-相同，但三路相机合成在单个 `/quad_tile/compressed` 话题里，靠 `camera_tiles` 拆分，见下文。
+`marvin-gripper-quadtile` 的三路相机合成在单个 `/quad_tile*` 话题里，靠 `camera_tiles` 拆分，
+见下文；raw 与 compressed 两种拼法由配方切换，不要再手工改 profile。
 
 相机数量不同必须用不同 profile：LeRobot 数据集要求每个 episode 暴露相同的特征集，
 所以"只有头部相机"的录制和"三相机"的录制是两个数据集，不能混在一起转换。
 
-用 `--profile <名称或 JSON 路径>` 选择。自定义机器人写一个 JSON 即可，不需要改代码：
+用 `--recipe` 间接选择，或用 `--profile <名称或 JSON 路径>` 直接指定。
+自定义机器人写一个 JSON 即可，不需要改代码：
 
 ```json
 {
   "name": "my-robot",
   "robot_type": "my-robot",
   "arm": {
-    "joint_states_topic": "/tj/joint_states",
+    "joint_states_topic": "/joint_states",
     "joint_names": ["Joint1_L", "...", "Joint7_R"],
     "command_topics": ["/tj/control/joint_cmd_A", "/tj/control/joint_cmd_B"],
     "command_dim": 7
@@ -100,7 +199,7 @@ MCAP 自带 schema；**rosbag2 sqlite3（format version 5）不带**，`.db3` �
 resize 的目标尺寸，缩放用 `INTER_LINEAR`，与部署端 `_resize_camera` 相同，**保证训练帧和推理
 帧经过同一条滤波路径**。
 
-`marvin-gripper-quadtile`（`tool/profiles/marvin-gripper-quadtile.json`）就是这样一个 profile，
+`marvin-gripper-quadtile`（`tool/robot_data/profiles/builtin/marvin-gripper-quadtile.json`）就是这样一个 profile，
 对应 realsense 节点的 hero3 布局（`components/realsense/config/realsense.yaml`：
 `top_count: 1`, `top_height: 960`, 输出 1280x1440）：
 
@@ -209,7 +308,7 @@ LeRobot 0.6 的官方 `record_loop()` 顺序是 `robot.get_observation()` → `t
 
 ⚠️ 与 `joint-state-fill` 相同的告诫：**重建出来的动作列是观测的恒等副本**，
 只能表达"保持当前位姿"。用于训练前请确认该自由度在整集内确实是停放状态
-（`check_rosbag_quality.py` 会给出该话题的实际活动区间）。
+（`rdp check-rosbag` 会给出该话题的实际活动区间）。
 
 `--grid-anchor` 三种取值：
 
@@ -238,13 +337,10 @@ p50 = 30.78 ms，而 `anchor-camera-ticks` 为 0.00 ms，帧数与命令延迟�
 ## 1. rosbag2 → 对齐 HDF5
 
 ```bash
-conda run -n lerobot python tool/rosbag2_to_hdf5_aligned.py \
+conda run -n lerobot tool/rdp export-hdf5 \
+  --recipe mcap-dexhand \
   --input /path/to/rosbags \
   --output-dir /path/to/hdf5 \
-  --profile tj-dexhand \
-  --fps 30 \
-  --alignment-mode lerobot-loop \
-  --grid-anchor anchor-camera-ticks \
   --recursive --on-error skip
 ```
 
@@ -254,35 +350,33 @@ HDF5 除 ACT 字段外还保存 `timestamps/grid_ns`、每路源时间戳、`act
 ## 2. rosbag2 → LeRobotDataset v3
 
 ```bash
-conda run -n lerobot python tool/rosbag2_to_lerobotv3.py \
+conda run -n lerobot tool/rdp convert \
+  --recipe mcap-dexhand \
   --input /path/to/rosbags \
   --output /path/to/my_dataset \
   --repo-id local/my_dataset \
-  --task "pick up the object" \
-  --profile tj-dexhand \
-  --fps 30 \
-  --grid-anchor anchor-camera-ticks
+  --task "pick up the object"
 ```
 
-旧版 `.db3`（`marvin-gripper` 一代）需要加 `--action-gap-policy joint-state-fill`，
-因为这批录制里两条手臂是**交替**遥操作的，某条手臂会整段没有 `joint_cmd`。
-如果这批数据里还有整段为空的指令话题（单手任务、缺 `gripperValue*`），
-再加上 `--missing-topic-policy fill`，一个 profile 就能覆盖整个语料，
-不必按批次拆 profile：
+旧版 `.db3` 用 `db3-gripper` / `db3-dexhand` 配方，宽松设置已经写在配方里，
+不需要每次重敲 `--action-gap-policy joint-state-fill --missing-topic-policy fill ...`：
 
 ```bash
-conda run -n lerobot python tool/rosbag2_to_lerobotv3.py \
+conda run -n lerobot tool/rdp convert \
+  --recipe db3-gripper \
   --input /path/to/gift_bags \
   --output /path/to/my_dataset \
-  --profile marvin-gripper \
-  --action-gap-policy joint-state-fill \
-  --missing-topic-policy fill \
-  --end-effector-tolerance-ms 300 \
-  --fps 30 --on-error skip
+  --on-error skip
 ```
 
-`--end-effector-tolerance-ms` 需要放宽是因为夹爪指令值不变时发布端会停发：
+配方里 `--end-effector-tolerance-ms` 放宽到 300 ms，是因为夹爪指令值不变时发布端会停发：
 实测 `/control/gripperValueL` 名义 20 Hz，夹爪停在闭合位时出现过 250 ms 的间隔。
+
+批量转换多个采集批次用 `tool/scripts/convert_batches.sh`，一个批次一个数据集：
+
+```bash
+RECIPE=mcap-gripper-quadtile CHECK=1 tool/scripts/convert_batches.sh /path/to/录制根目录
+```
 
 **训练数据建议直接走这条路径，不要经过 HDF5。** 同一段数据实测：
 gzip HDF5 273 MB，LeRobot v3（AV1 CRF 0 无损）7.6 MB，差 36 倍。
@@ -291,13 +385,16 @@ HDF5 适合做归档、ACT 兼容或调试。
 ## 3. HDF5 → LeRobotDataset v3
 
 ```bash
-conda run -n lerobot python tool/hdf5_to_lerobotv3.py \
+conda run -n lerobot tool/rdp convert-hdf5 \
   --input /path/to/hdf5_folder \
   --output /path/to/my_dataset \
   --repo-id local/my_dataset \
   --task "pick up the object" \
   --fps 30
 ```
+
+HDF5 自带对齐结果与话题布局，所以这里只有配方的 `video` 块生效
+（`--recipe` 仍可用来统一编码设置）。
 
 状态维度与名称从 HDF5 的 `state_dim` / `state_names_json` 属性读取，不再假定 16 维。
 缺少 `schema_version` 属性（对齐来源未知）的文件默认拒绝，确认无误后可加
@@ -308,7 +405,10 @@ conda run -n lerobot python tool/hdf5_to_lerobotv3.py \
 并在顶层汇总 `action_equals_state_episodes`。这类 episode 没有指令信号，
 策略只会学到 `a_t = s_t`，请确认这是预期行为。需要恢复旧的严格行为时加 `--strict-action`。
 
-转换前可用 `tool/check_hdf5_quality.py` 先体检 HDF5（`--layout` 可列出数据集结构）。
+转换前用 `rdp check-hdf5` 先体检（`--layout` 列出数据集结构与压缩比）。
+报告会打印文件记录的**来源话题**——每路相机对应哪个 ROS 话题、末端执行器有没有实测状态——
+所以一个 HDF5 episode 也能自证它是从哪套话题转出来的；
+文件里有 profile 未声明的相机、或 profile 声明了但文件里没有的相机，都会单独标出。
 维度不写死：state 宽度、手臂维度、各末端执行器的切片都从文件的 `state_dim` /
 `state_names_json` / `profile_json` 属性读取，因此 16 维夹爪与 54 维灵巧手都能正确检查；
 缺少这些属性的旧文件退化为按 `action` 实际宽度检查。
@@ -316,10 +416,37 @@ conda run -n lerobot python tool/hdf5_to_lerobotv3.py \
 ## 0. 转换前：体检 rosbag
 
 ```bash
-conda run -n lerobot python tool/check_rosbag_quality.py /path/to/rosbag --profile marvin-dexhand
+conda run -n lerobot tool/rdp check-rosbag /path/to/rosbag --recipe mcap-gripper-quadtile
 ```
 
-检查器与转换脚本共用同一份 profile 和同一个 reader，因此两者对"这个录制应该包含什么"
+报告第一节是**话题清单**：录制里的每个话题、消息类型、条数与实测频率，
+标出 profile 用到了哪些（`使用`）、声明了却没有或为空（`缺失` / `为空`）、
+以及录制里有但 profile 没用到的（`未用`）。相机话题对不上时，
+它会直接指出录制里真正存在的图像话题是哪个：
+
+```text
+  缺失    camera              0         -         -  -                  /quad_tile   -> top, wrist_L, wrist_R
+  未用    -                 883      30.0      29.4  CompressedImage    /quad_tile/compressed
+
+  ❌ profile 与录制内容不匹配：
+     - camera topic /quad_tile is not advertised by the recording (cameras top, wrist_L, wrist_R)
+     提示：the recording does carry image topics the profile does not use: /quad_tile/compressed (883 msgs)
+```
+
+紧接着是**相机分辨率与裁切**：每个相机话题解码一帧，报告实际像素尺寸；
+拼接图 profile 还会把每块 tile 的裁切范围和缩放结果算出来，
+用来确认 `camera_tiles` 真的落在该落的位置：
+
+```text
+  /quad_tile/compressed -> top, wrist_L, wrist_R: 1280x1440 (CompressedImage)
+      top      裁切 x[0:1280] y[0:960] = 1280x960，缩放到 640x480
+      wrist_L  裁切 x[0:640] y[960:1440] = 640x480，原尺寸
+```
+
+只要话题清单，用 `--inventory-only`（最快，不做频率统计）；
+父目录会递归检查其下所有 bag。退出码 0=PASS、1=WARN、2=FAIL。
+
+检查器与转换共用同一份 profile/配方和同一个 reader，因此两者对"这个录制应该包含什么"
 的判断永远一致，`.db3` 与 `.mcap` 都能读。只读时间戳、不解码图像，多 GiB 的 bag 几秒完成。
 标称频率由实测中位周期得出，不写死，所以 30 Hz 相机与 500 Hz 关节流用同一套阈值。
 
@@ -397,7 +524,7 @@ CRF 0 消除量化损失，但 `yuv420p` 仍有色度下采样；要求 RGB 逐�
 部分发布者复用序列化缓冲区却没有截断长度，导致 `sensor_msgs/JointState` 消息尾部带上几个字节的
 垃圾数据。ROS 2 自己的反序列化器会忽略尾部多余字节，但 `rosbags` 会直接断言失败。
 
-本工具对 JointState 先用 `rosbags` 解析，失败时回退到 `tool/ros_messages.py` 里的容错 CDR
+本工具对 JointState 先用 `rosbags` 解析，失败时回退到 `tool/robot_data/ros/cdr.py` 里的容错 CDR
 读取器，并在 `audit.tolerant_cdr_parses` 中记录每个话题的回退次数。
 
 **这是录制端的 bug，回退只是让数据可读，请在录制端修复。** 该字段非零就说明问题仍然存在。

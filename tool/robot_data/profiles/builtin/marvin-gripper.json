@@ -1,0 +1,75 @@
+{
+  "name": "marvin-gripper",
+  "robot_type": "marvin",
+  "_comment": [
+    "Legacy .db3 generation: raw sensor_msgs/Image cameras, one topic per camera,",
+    "scalar Float32 grippers with a Float32MultiArray feedback topic. Component 0 of",
+    "the feedback vector is the measured opening; older bags omit the topic entirely,",
+    "in which case the observation degrades to a command echo."
+  ],
+  "arm": {
+    "joint_states_topic": "/joint_states",
+    "joint_names": [
+      "Joint1_L",
+      "Joint2_L",
+      "Joint3_L",
+      "Joint4_L",
+      "Joint5_L",
+      "Joint6_L",
+      "Joint7_L",
+      "Joint1_R",
+      "Joint2_R",
+      "Joint3_R",
+      "Joint4_R",
+      "Joint5_R",
+      "Joint6_R",
+      "Joint7_R"
+    ],
+    "command_topics": [
+      "/control/joint_cmd_A",
+      "/control/joint_cmd_B"
+    ],
+    "command_dim": 7
+  },
+  "end_effectors": [
+    {
+      "name": "L",
+      "kind": "gripper",
+      "dim": 1,
+      "command_topic": "/control/gripperValueL",
+      "command_kind": "float32",
+      "state_topic": "/gripper/feedback_L",
+      "state_kind": "float32multiarray",
+      "state_indices": [
+        0
+      ]
+    },
+    {
+      "name": "R",
+      "kind": "gripper",
+      "dim": 1,
+      "command_topic": "/control/gripperValueR",
+      "command_kind": "float32",
+      "state_topic": "/gripper/feedback_R",
+      "state_kind": "float32multiarray",
+      "state_indices": [
+        0
+      ]
+    }
+  ],
+  "cameras": {
+    "top": "/camera_head/camera_head/color/image_raw",
+    "wrist_L": "/camera_left_wrist/camera_left_wrist/color/image_rect_raw",
+    "wrist_R": "/camera_right_wrist/camera_right_wrist/color/image_rect_raw"
+  },
+  "depths": {
+    "top": "/camera_head/camera_head/aligned_depth_to_color/image_raw",
+    "wrist_L": "/camera_left_wrist/camera_left_wrist/aligned_depth_to_color/image_raw",
+    "wrist_R": "/camera_right_wrist/camera_right_wrist/aligned_depth_to_color/image_raw"
+  },
+  "anchor_camera": "top",
+  "message_definitions": {
+    "marvin_msgs/msg/Jointcmd": "std_msgs/Header header\nfloat64[7] positions\n",
+    "marvin_msgs/msg/JointcmdArm": "std_msgs/Header header\nfloat64[7] positions\n"
+  }
+}

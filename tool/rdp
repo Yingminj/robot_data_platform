@@ -1,0 +1,20 @@
+#!/usr/bin/env python3
+"""``rdp`` -- robot data platform conversion tool.
+
+Kept as a plain script rather than an installed console entry point so it runs
+straight out of a checkout under whichever interpreter has ``rosbags``/``lerobot``:
+
+    conda run -n lerobot ./tool/rdp check-rosbag <bag> --recipe mcap-gripper-quadtile
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from robot_data.cli.main import main  # noqa: E402
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

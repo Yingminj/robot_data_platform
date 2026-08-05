@@ -1,0 +1,39 @@
+{
+  "name": "mcap-gripper-quadtile",
+  "storage": "mcap",
+  "description": "MCAP gripper rig, cameras stitched into /quad_tile/compressed (express_mcap, express2)",
+
+  "_comment": [
+    "FREQUENTLY TUNED: the video block below. Everything in it can also be given",
+    "on the command line, and an explicit flag always wins:",
+    "    rdp convert --recipe mcap-gripper-quadtile --crf 28 --video-codec libsvtav1",
+    "CRF ranges differ per encoder (x264 0-51, AV1 0-63); 0 is lossless.",
+    "See test_lerobot/REPORT.md for the codec/CRF comparison this default came from."
+  ],
+  "video": {
+    "codec": "h264",
+    "crf": 20,
+    "gop": 2,
+    "pixel_format": "yuv420p"
+  },
+
+  "profile": "marvin-gripper-quadtile",
+  "alignment": {
+    "fps": 30,
+    "mode": "lerobot-loop",
+    "grid_anchor": "anchor-camera-ticks",
+    "action_gap_policy": "hold-last-command",
+    "missing_topic_policy": "fail",
+    "invalid_frame_policy": "fail",
+    "max_decode_errors": 0,
+    "max_tick_rate_deviation": 0.1
+  },
+
+  "notes": [
+    "The three cameras are crops of one mosaic, so they share a capture stamp and",
+    "a JPEG quantisation. Prefer mcap-gripper-percam when the rig is recording the",
+    "per-camera topics: the mosaic destroys native resolution and per-camera stamps.",
+    "The head tile is stored 2x upscaled inside the mosaic and is scaled back down",
+    "to 640x480 by the profile's camera_tiles, matching split_hero3_image exactly."
+  ]
+}

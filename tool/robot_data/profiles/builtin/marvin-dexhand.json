@@ -1,0 +1,111 @@
+{
+  "name": "marvin-dexhand",
+  "robot_type": "marvin",
+  "_comment": [
+    "Bulk of the recorded corpus: MCAP, legacy arm topic names, 20-DoF dexterous",
+    "hands with measured state, raw sensor_msgs/Image cameras."
+  ],
+  "arm": {
+    "joint_states_topic": "/joint_states",
+    "joint_names": [
+      "Joint1_L",
+      "Joint2_L",
+      "Joint3_L",
+      "Joint4_L",
+      "Joint5_L",
+      "Joint6_L",
+      "Joint7_L",
+      "Joint1_R",
+      "Joint2_R",
+      "Joint3_R",
+      "Joint4_R",
+      "Joint5_R",
+      "Joint6_R",
+      "Joint7_R"
+    ],
+    "command_topics": [
+      "/control/joint_cmd_A",
+      "/control/joint_cmd_B"
+    ],
+    "command_dim": 7
+  },
+  "end_effectors": [
+    {
+      "name": "left_hand",
+      "kind": "dexhand",
+      "dim": 20,
+      "command_topic": "/hand_left/joint_commands",
+      "command_kind": "jointstate",
+      "state_topic": "/hand_left/joint_states",
+      "state_kind": "jointstate",
+      "joint_names": [
+        "left_finger1_joint1",
+        "left_finger1_joint2",
+        "left_finger1_joint3",
+        "left_finger1_joint4",
+        "left_finger2_joint1",
+        "left_finger2_joint2",
+        "left_finger2_joint3",
+        "left_finger2_joint4",
+        "left_finger3_joint1",
+        "left_finger3_joint2",
+        "left_finger3_joint3",
+        "left_finger3_joint4",
+        "left_finger4_joint1",
+        "left_finger4_joint2",
+        "left_finger4_joint3",
+        "left_finger4_joint4",
+        "left_finger5_joint1",
+        "left_finger5_joint2",
+        "left_finger5_joint3",
+        "left_finger5_joint4"
+      ]
+    },
+    {
+      "name": "right_hand",
+      "kind": "dexhand",
+      "dim": 20,
+      "command_topic": "/hand_right/joint_commands",
+      "command_kind": "jointstate",
+      "state_topic": "/hand_right/joint_states",
+      "state_kind": "jointstate",
+      "joint_names": [
+        "right_finger1_joint1",
+        "right_finger1_joint2",
+        "right_finger1_joint3",
+        "right_finger1_joint4",
+        "right_finger2_joint1",
+        "right_finger2_joint2",
+        "right_finger2_joint3",
+        "right_finger2_joint4",
+        "right_finger3_joint1",
+        "right_finger3_joint2",
+        "right_finger3_joint3",
+        "right_finger3_joint4",
+        "right_finger4_joint1",
+        "right_finger4_joint2",
+        "right_finger4_joint3",
+        "right_finger4_joint4",
+        "right_finger5_joint1",
+        "right_finger5_joint2",
+        "right_finger5_joint3",
+        "right_finger5_joint4"
+      ]
+    }
+  ],
+  "cameras": {
+    "top": "/camera/camera/color/image_raw",
+    "wrist_L": "/wrist_left/wrist_left/color/image_rect_raw",
+    "wrist_R": "/wrist_right/wrist_right/color/image_rect_raw"
+  },
+  "depths": {
+    "top": "/camera/camera/aligned_depth_to_color/image_raw",
+    "wrist_L": "/wrist_left/wrist_left/aligned_depth_to_color/image_raw",
+    "wrist_R": "/wrist_right/wrist_right/aligned_depth_to_color/image_raw"
+  },
+  "anchor_camera": "top",
+  "message_definitions": {
+    "marvin_msgs/msg/Jointcmd": "std_msgs/Header header\nfloat64[7] positions\n",
+    "marvin_msgs/msg/JointcmdArm": "std_msgs/Header header\nfloat64[7] positions\n"
+  }
+}

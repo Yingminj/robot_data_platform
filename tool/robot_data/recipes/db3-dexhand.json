@@ -1,0 +1,48 @@
+{
+  "name": "db3-dexhand",
+  "storage": "sqlite3",
+  "description": "Legacy .db3 dexterous-hand rig, lenient alignment for heavy frame loss",
+
+  "_comment": [
+    "FREQUENTLY TUNED: the video block below; an explicit CLI flag always wins.",
+    "",
+    "Same leniency as db3-gripper, against the 20-DoF hand profile. See that",
+    "recipe's notes for what each relaxation costs -- they apply identically here.",
+    "For head-only recordings in this generation pass --profile marvin-dexhand-head;",
+    "the camera count is part of the feature set, so those are a separate dataset."
+  ],
+  "video": {
+    "codec": "h264",
+    "crf": 20,
+    "gop": 2,
+    "pixel_format": "yuv420p"
+  },
+
+  "profile": "marvin-dexhand",
+  "alignment": {
+    "fps": 30,
+    "mode": "lerobot-loop",
+    "grid_anchor": "anchor-camera-ticks",
+
+    "action_gap_policy": "joint-state-fill",
+    "missing_topic_policy": "fill",
+    "invalid_frame_policy": "drop",
+
+    "max_decode_errors": 50,
+    "max_tick_rate_deviation": 0.25,
+    "image_tolerance_ms": 150.0,
+    "state_tolerance_periods": 4.5,
+    "end_effector_tolerance_ms": 300.0,
+    "max_hold_fraction": 0.6
+  },
+
+  "notes": [
+    "A dexhand batch is state_dim 54 against the gripper's 16, so it can never share",
+    "a LeRobot dataset with a gripper batch however similar the task.",
+    "The hands publish JointState with measured feedback, so their observation is a",
+    "real measurement rather than a command echo -- unlike the tj-dexhand generation.",
+    "Both hand command topics are fillable: if one hand is silent for a whole",
+    "recording, missing_topic_policy fill copies its measured joints into the action.",
+    "Confirm the hand was genuinely parked before training on those episodes."
+  ]
+}

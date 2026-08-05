@@ -1,0 +1,58 @@
+{
+  "name": "mcap-gripper-quadtile-raw",
+  "storage": "mcap",
+  "description": "MCAP gripper rig, mosaic published raw as /quad_tile sensor_msgs/Image (express_raw)",
+
+  "_comment": [
+    "FREQUENTLY TUNED: the video block below; an explicit CLI flag always wins.",
+    "",
+    "Identical to mcap-gripper-quadtile except for the camera topic. Both spellings",
+    "of the mosaic exist in the recorded corpus -- /quad_tile carries raw Image and",
+    "/quad_tile/compressed carries JPEG -- and picking the wrong one used to mean",
+    "hand-editing the shared profile before every batch. The override lives here so",
+    "the profile stays a description of the robot rather than of one batch."
+  ],
+  "video": {
+    "codec": "h264",
+    "crf": 20,
+    "gop": 2,
+    "pixel_format": "yuv420p"
+  },
+
+  "profile": "marvin-gripper-quadtile",
+  "cameras": {
+    "top": "/quad_tile",
+    "wrist_L": "/quad_tile",
+    "wrist_R": "/quad_tile"
+  },
+  "anchor_camera": "top",
+
+  "alignment": {
+    "fps": 30,
+    "mode": "lerobot-loop",
+    "grid_anchor": "anchor-camera-ticks",
+    "action_gap_policy": "hold-last-command",
+    "missing_topic_policy": "fail",
+    "invalid_frame_policy": "fail",
+    "max_decode_errors": 0,
+    "max_tick_rate_deviation": 0.1,
+
+    "state_tolerance_periods": 2.0
+  },
+
+  "notes": [
+    "state_tolerance_periods is 2.0 here against 1.5 for the compressed recipe, and",
+    "that difference is the whole reason these are two recipes rather than one topic",
+    "override. A raw mosaic frame is ~5 MB, so writing it blocks the recorder and the",
+    "receive times of everything else go bursty -- and lerobot-loop alignment reads",
+    "receive time, not header.stamp. Measured on express_raw: /joint_states is clean",
+    "(100 Hz, zero drops, 10.4 ms max gap) yet the age of the newest sample before a",
+    "camera tick reaches p99 16.0 ms / max 17.1 ms, so the 15 ms default rejected",
+    "41 of 1103 rows. 20 ms clears it with headroom while staying far tighter than",
+    "the db3 recipes' 45 ms. Re-measure before widening it further: past ~2.5 periods",
+    "the bound stops describing jitter and starts hiding real dropouts.",
+    "The mosaic topic itself does drop frames (~2.6% estimated on express_raw), which",
+    "'rdp check-rosbag' reports as a WARN. That is a recording-side problem; widening",
+    "--image-tolerance-ms would only conceal it."
+  ]
+}

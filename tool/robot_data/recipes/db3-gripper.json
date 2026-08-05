@@ -1,0 +1,60 @@
+{
+  "name": "db3-gripper",
+  "storage": "sqlite3",
+  "description": "Legacy .db3 gripper rig, lenient alignment for heavy frame loss",
+
+  "_comment": [
+    "FREQUENTLY TUNED: the video block below; an explicit CLI flag always wins.",
+    "",
+    "The alignment block is deliberately more permissive than the mcap recipes.",
+    "The .db3 generation drops frames heavily and its teleop logic leaves one arm's",
+    "joint_cmd silent for whole segments while the other is driven, so the strict",
+    "defaults reject nearly every episode. Each relaxation is listed below with what",
+    "it costs -- none of them are free, and they all show up in the per-episode audit.",
+    "",
+    "These numbers are a starting point, not a measurement: tighten them once you",
+    "have run 'rdp check-rosbag' over a representative batch and know the real drop",
+    "rate and joint_states period."
+  ],
+  "video": {
+    "codec": "h264",
+    "crf": 20,
+    "gop": 2,
+    "pixel_format": "yuv420p"
+  },
+
+  "profile": "marvin-gripper",
+  "alignment": {
+    "fps": 30,
+    "mode": "lerobot-loop",
+    "grid_anchor": "anchor-camera-ticks",
+
+    "action_gap_policy": "joint-state-fill",
+    "missing_topic_policy": "fill",
+    "invalid_frame_policy": "drop",
+
+    "max_decode_errors": 50,
+    "max_tick_rate_deviation": 0.25,
+    "image_tolerance_ms": 150.0,
+    "state_tolerance_periods": 4.5,
+    "end_effector_tolerance_ms": 300.0,
+    "max_hold_fraction": 0.6
+  },
+
+  "notes": [
+    "joint-state-fill: a silent arm's action columns are copied from its own",
+    "measured joints. Those rows teach 'hold the current pose' and nothing else --",
+    "audit.hold.joint_state_fill_rows counts them per arm, and the dataset exposes",
+    "timestamps/action_hold_mask so training can weight them down.",
+    "missing_topic_policy fill: a topic absent for the whole recording is rebuilt",
+    "the same way. Check audit.missing_topics before training on such a batch.",
+    "invalid_frame_policy drop: rows breaching a tolerance are discarded instead of",
+    "failing the episode. audit.dropped_frames says how many; a large number means",
+    "the recording, not the tolerance, is the problem.",
+    "max_tick_rate_deviation 0.25: accepts an anchor camera running 22.5-37.5 Hz",
+    "against --fps 30. The LeRobot timestamp column is frame_index/fps, so anything",
+    "accepted here is real clock drift in the dataset.",
+    "max_hold_fraction 0.6: still rejects an episode that is mostly held action,",
+    "which is the failure mode this leniency would otherwise hide."
+  ]
+}
