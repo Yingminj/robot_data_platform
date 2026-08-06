@@ -37,6 +37,14 @@ class RGBVideoConfig:
     encoder_threads: int | None = None
 
 
+# LeRobot v3 concatenates episodes into one mp4 per camera until it reaches
+# video_files_size_in_mb (default 200), so an episode's frames start at an
+# arbitrary offset inside a shared file and its frame indices no longer match
+# the episode's own. 1 is the smallest value the writer accepts and makes it
+# roll over to a new file after every episode, giving one mp4 per episode.
+VIDEO_FILE_SIZE_MB = 1
+
+
 def _check_lerobot() -> str:
     try:
         version = importlib.metadata.version("lerobot")
@@ -196,6 +204,7 @@ def create_dataset(
         rgb_encoder=rgb_encoder,
         depth_encoder=depth_encoder,
         encoder_threads=rgb_config.encoder_threads,
+        video_files_size_in_mb=VIDEO_FILE_SIZE_MB,
     )
     return dataset, features, version
 
@@ -252,6 +261,7 @@ def write_manifest(
         "repo_id": repo_id,
         "image_storage": image_storage,
         "rgb_encoder": asdict(rgb_config),
+        "video_files_size_in_mb": VIDEO_FILE_SIZE_MB,
         "episodes": episodes,
         **(extra or {}),
     }

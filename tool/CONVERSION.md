@@ -483,6 +483,25 @@ conda run -n lerobot tool/rdp check-rosbag /path/to/rosbag --recipe mcap-gripper
 CRF 0 消除量化损失，但 `yuv420p` 仍有色度下采样；要求 RGB 逐像素可逆请用
 `--image-storage image`（PNG）或 `--video-pixel-format yuv444p`。
 
+### 每个 episode 一个视频文件
+
+LeRobot v3 默认把多个 episode 拼进同一个 mp4（`video_files_size_in_mb=200`），
+episode 的画面从文件中间某个 `from_timestamp` 开始，帧号与 episode 内帧号对不上，
+事后再切分容易切错。写入器固定传 `video_files_size_in_mb=1`
+（`tool/robot_data/writers/lerobot_v3.py` 的 `VIDEO_FILE_SIZE_MB`，也是 LeRobot 允许的最小值），
+于是每个 episode 写完就滚动到新文件：
+
+```text
+videos/observation.images.top/chunk-000/file-000.mp4   # episode 0，from_timestamp = 0.0
+videos/observation.images.top/chunk-000/file-001.mp4   # episode 1，from_timestamp = 0.0
+```
+
+`file_index` 因此等于 episode 序号（每 1000 个滚一次 `chunk_index`），
+无需再用 `tool/scripts/split_episode_videos.py` 事后切。该值会写进
+`meta/conversion_manifest.json`。注意滚动条件是「已有文件 + 本 episode ≥ 1 MB」，
+所以两个都不足 0.5 MB 的极短 episode 仍可能被拼在一起；正常时长的录制不会触发。
+数据 parquet 不受影响，仍按默认大小合并。
+
 ## 常用门禁参数
 
 ```text
