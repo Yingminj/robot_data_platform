@@ -1,10 +1,14 @@
 {
-  "name": "tj-dexhand",
+  "name": "tj-dexhand-quadcam",
   "robot_type": "marvin",
   "_comment": [
-    "Newer MCAP setup: compressed JPEG cameras, /tj-prefixed arm topics.",
-    "/hand_left/joint_states is absent from current recordings, so the left hand's",
-    "observation is a command echo."
+    "Dexhand rig recording the mosaic: all three cameras come from one",
+    "/quad_tile/compressed topic and are cropped out by camera_tiles, using the same",
+    "hero3 layout as marvin-gripper-quadtile (head stored 2x upscaled, so its crop is",
+    "1280x960 downscaled to 640x480).",
+    "Both hands publish joint_states here, so their observations are measured rather",
+    "than command echoes -- that is the difference from tj-dexhand, along with the",
+    "cameras. Use recipe mcap-dexhand-quadtile."
   ],
   "arm": {
     "joint_states_topic": "/joint_states",
@@ -95,9 +99,23 @@
     }
   ],
   "cameras": {
-    "top": "/camera/camera/color/image_raw",
-    "wrist_L": "/wrist_left/wrist_left/color/image_rect_raw",
-    "wrist_R": "/wrist_right/wrist_right/color/image_rect_raw"
+    "top": "/quad_tile/compressed",
+    "wrist_L": "/quad_tile/compressed",
+    "wrist_R": "/quad_tile/compressed"
+  },
+  "camera_tiles": {
+    "top": {
+      "left": 0.0, "top": 0.0, "right": 1.0, "bottom": 0.6666666666666666,
+      "width": 640, "height": 480
+    },
+    "wrist_L": {
+      "left": 0.0, "top": 0.6666666666666666, "right": 0.5, "bottom": 1.0,
+      "width": 640, "height": 480
+    },
+    "wrist_R": {
+      "left": 0.5, "top": 0.6666666666666666, "right": 1.0, "bottom": 1.0,
+      "width": 640, "height": 480
+    }
   },
   "depths": {},
   "anchor_camera": "top",

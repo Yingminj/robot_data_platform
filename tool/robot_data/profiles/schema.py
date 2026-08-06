@@ -500,6 +500,23 @@ def profile_from_dict(payload: dict[str, Any]) -> RobotProfile:
         raise ProfileError(f"profile is missing required key: {exc}") from exc
 
 
+def document_kind(payload: dict[str, Any]) -> str:
+    """``"profile"``, ``"recipe"`` or ``"unknown"`` for a parsed JSON document.
+
+    Profiles and recipes are both JSON, both carry a ``name``, and both are
+    accepted as a bare path, so ``--recipe some-profile.json`` is an easy slip.
+    Telling the two apart at load time turns an unknown-keys dump into a message
+    that names the flag the file actually belongs to.  A recipe *references* a
+    profile by name; only a profile *describes* one, which is what ``arm`` and
+    ``end_effectors`` mark.
+    """
+    if "arm" in payload or "end_effectors" in payload:
+        return "profile"
+    if "profile" in payload or "storage" in payload or "alignment" in payload:
+        return "recipe"
+    return "unknown"
+
+
 def builtin_profile_names() -> list[str]:
     """Names of the profiles shipped in ``profiles/builtin``."""
     return sorted(path.stem for path in BUILTIN_DIR.glob("*.json"))
@@ -510,6 +527,17 @@ def _load_builtin(name: str) -> RobotProfile:
     path = BUILTIN_DIR / f"{name}.json"
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload.pop("_comment", None)
+    declared = str(payload.get("name", name))
+    if declared != name:
+        # A built-in is selected by filename but reports itself by this field --
+        # in the run banner, in `rdp profiles`, and in the dataset manifest.  A
+        # profile copied from another one and not renamed would otherwise have
+        # every converted dataset claim it came from the file it was copied from.
+        raise ProfileError(
+            f"built-in profile {path.name} declares name {declared!r}; "
+            f"the name field must match the filename ({name!r}). "
+            "This usually means the file was copied from another profile."
+        )
     return profile_from_dict(payload)
 
 
@@ -521,6 +549,11 @@ def load_profile(name_or_path: str) -> RobotProfile:
     if path.is_file():
         payload = json.loads(path.read_text(encoding="utf-8"))
         payload.pop("_comment", None)
+        if document_kind(payload) == "recipe":
+            raise ProfileError(
+                f"{path} is a conversion recipe, not a robot profile. "
+                "Pass it with --recipe instead of --profile."
+            )
         return profile_from_dict(payload)
     raise ProfileError(
         f"unknown profile {name_or_path!r}; built-ins are {builtin_profile_names()} "

@@ -28,7 +28,12 @@ from pathlib import Path
 from typing import Any
 
 from robot_data.errors import RecipeError
-from robot_data.profiles.schema import RobotProfile, apply_topic_overrides, load_profile
+from robot_data.profiles.schema import (
+    RobotProfile,
+    apply_topic_overrides,
+    document_kind,
+    load_profile,
+)
 
 RECIPE_DIR = Path(__file__).resolve().parent
 
@@ -103,6 +108,15 @@ def recipe_names() -> list[str]:
 
 
 def _validate(payload: dict[str, Any], source: str) -> None:
+    if document_kind(payload) == "profile":
+        # Checked before the unknown-key sweep, which would otherwise report a
+        # profile's own fields as recipe typos and hide what went wrong.
+        raise RecipeError(
+            f"{source} is a robot profile, not a conversion recipe. "
+            "Pass it with --profile instead of --recipe, or write a recipe that "
+            f"references it: {{\"profile\": \"<name>\", \"storage\": ..., \"video\": ...}}. "
+            f"Shipped recipes: {recipe_names()}"
+        )
     unknown = set(payload) - TOP_LEVEL_KEYS
     if unknown:
         raise RecipeError(f"{source}: unknown recipe keys {sorted(unknown)}")

@@ -75,6 +75,7 @@ conda run -n lerobot tool/rdp <命令> [参数]
 | `mcap-gripper-quadtile-raw` | mcap | 同上 | `/quad_tile`（raw Image） | 默认（严格） |
 | `mcap-gripper-percam` | mcap | `marvin-gripper-percam` | 每相机一个 compressed 话题 | 允许重建缺失夹爪指令 |
 | `mcap-dexhand` | mcap | `tj-dexhand` | 每相机一个 compressed 话题 | 默认（严格） |
+| `mcap-dexhand-quadtile` | mcap | `tj-dexhand-quadcam` | `/quad_tile/compressed` | 默认（严格） |
 | `db3-gripper` | sqlite3 | `marvin-gripper` | 每相机一个 raw 话题 | 宽松，见下 |
 | `db3-dexhand` | sqlite3 | `marvin-dexhand` | 每相机一个 raw 话题 | 宽松，见下 |
 
@@ -123,7 +124,7 @@ max_hold_fraction    0.6                仍然拒绝「基本没在动」的 epi
 
 `tool/robot_data/profiles/builtin/*.json` 用声明式配置描述"机器人是什么"：
 话题名、末端执行器类型与自由度、相机映射。没有任何 profile 写在 Python 里，
-新增一个只是多一个 JSON 文件。内置六个：
+新增一个只是多一个 JSON 文件。内置七个：
 
 | profile | 手臂话题 | 图像 | 相机 | 末端执行器 | state_dim |
 |---|---|---|---|---|---|
@@ -133,9 +134,15 @@ max_hold_fraction    0.6                仍然拒绝「基本没在动」的 epi
 | `tj-dexhand`（默认） | `/joint_states`, `/tj/control/joint_cmd_A\|B` | `CompressedImage`（JPEG） | 3（`/head_camera`, `/wrist_*_camera`） | `dexhand` × 2 | 54 |
 | `marvin-gripper-quadtile` | `/joint_states`, `/control/joint_cmd_A\|B` | 拼接图 | 3（同一个 `/quad_tile*` 话题） | `gripper` × 2 | 16 |
 | `marvin-gripper-percam` | 同上 | `CompressedImage` | 3（每相机一个话题） | `gripper` × 2，`/info/gripper_feedback_*` 反馈 | 16 |
+| `tj-dexhand-quadcam` | `/joint_states`, `/control/joint_cmd_A\|B` | 拼接图（JPEG） | 3（同一个 `/quad_tile/compressed`） | `dexhand` × 2，两只手都有实测 `joint_states` | 54 |
 
-`marvin-gripper-quadtile` 的三路相机合成在单个 `/quad_tile*` 话题里，靠 `camera_tiles` 拆分，
-见下文；raw 与 compressed 两种拼法由配方切换，不要再手工改 profile。
+`marvin-gripper-quadtile` 与 `tj-dexhand-quadcam` 的三路相机合成在单个 `/quad_tile*` 话题里，
+靠 `camera_tiles` 拆分（两者裁切块完全相同，都是 hero3 布局），见下文；
+raw 与 compressed 两种拼法由配方切换，不要再手工改 profile。
+
+**profile 文件名即 profile 名**：`builtin/` 下 JSON 的 `name` 字段必须与文件名一致，
+否则加载时直接报错。这条约束存在的原因是——从别的 profile 复制一份、改了话题却忘了改 `name`，
+运行横幅、`rdp profiles` 和数据集 manifest 都会声称自己是被复制的那一个。
 
 相机数量不同必须用不同 profile：LeRobot 数据集要求每个 episode 暴露相同的特征集，
 所以"只有头部相机"的录制和"三相机"的录制是两个数据集，不能混在一起转换。
@@ -480,7 +487,8 @@ CRF 0 消除量化损失，但 `yuv420p` 仍有色度下采样；要求 RGB 逐�
 
 ```text
 --image-tolerance-ms          capture 默认半帧；lerobot-loop 默认 1.5 帧
---state-tolerance-ms          默认为实测 joint_states 周期的 1.5 倍
+--state-tolerance-ms          绝对值；不指定时取「1.5 × 实测 joint_states 周期」与「半个控制周期」的较大者
+--state-tolerance-periods     上式中的倍数，默认 1.5（db3 配方 4.5）
 --action-tolerance-ms         默认一帧周期（30 FPS 时 33.33 ms）
 --action-pair-tolerance-ms    默认 5 ms
 --end-effector-tolerance-ms   默认 100 ms
@@ -492,8 +500,17 @@ CRF 0 消除量化损失，但 `yuv420p` 仍有色度下采样；要求 RGB 逐�
 --max-decode-errors 0         默认任何必需消息解析错误都失败
 ```
 
-`--state-tolerance-ms` 默认自适应：以"tick 之前最新一帧"取值时，状态年龄天然分布在一个发布周期内，
-固定阈值等于发布周期会因为普通抖动误杀。
+`--state-tolerance-ms` 默认自适应，取两项的较大者，因为让状态变旧的原因有两个：
+
+1. **发布周期**：以"tick 之前最新一帧"取值时，状态年龄天然分布在一个发布周期内，
+   固定阈值等于发布周期会因为普通抖动误杀。这一项即 `--state-tolerance-periods × 实测周期`。
+2. **录制抖动**：写入大尺寸图像会阻塞 recorder，tick 因此落在最新状态样本之后，
+   与该话题发布多快无关。只用第 1 项时高频话题反而被判得更严——
+   500 Hz 的 `/joint_states` 只有 2.8 ms 容差，而 100 Hz 的有 15 ms，
+   仪器更好的录制反而更容易被拒。所以第 1 项被**半个控制周期**兜底（30 FPS 时 16.7 ms）：
+   真正要保证的是状态与同一行的图像同时代，超过半个控制周期就谈不上"同一行"了。
+
+显式指定 `--state-tolerance-ms` 会绕过这两项，直接用绝对值。
 
 `drop` 会压缩无效控制行之间的真实时间，只适合明确接受该行为的清洗流程；生产数据建议保持 `fail`。
 

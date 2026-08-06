@@ -23,6 +23,11 @@ ACTION_GAP_POLICIES = ("fail", "hold-last-command", "joint-state-fill")
 MISSING_TOPIC_POLICIES = ("fail", "fill")
 GRID_ANCHORS = ("anchor-camera", "anchor-camera-ticks", "first-command")
 
+# Floor for the resolved arm-state tolerance, as a fraction of the control
+# period -- see AlignmentConfig.resolve_state_tolerance_ms for why a purely
+# relative bound is not enough.  At 30 fps this is 16.7 ms.
+STATE_TOLERANCE_CONTROL_FRACTION = 0.5
+
 
 @dataclass(frozen=True)
 class AlignmentConfig:
@@ -111,15 +116,31 @@ class AlignmentConfig:
     def resolve_state_tolerance_ms(self, source_period_ms: float) -> float:
         """Bound the age of the newest state sample preceding each tick.
 
-        With "latest sample before tick" semantics that age is naturally spread
-        over one source period, so a fixed default that happens to equal the
-        publishing period rejects rows for ordinary jitter.  Default to
-        ``state_tolerance_periods`` source periods unless the caller pins an
-        absolute value.
+        Two independent things make that sample old, and the bound has to cover
+        both:
+
+        * **Source period.** With "latest sample before tick" semantics the age
+          is naturally spread over one publishing period, so a bound below that
+          rejects rows for nothing.  ``state_tolerance_periods`` covers it, and
+          it has to stay relative because a batch that drops ``joint_states``
+          spans several periods whose length differs per batch.
+        * **Recorder jitter.** Writing a large camera frame stalls the recorder,
+          so the tick can land well after the newest state sample regardless of
+          how fast that topic publishes.  The period term says nothing about
+          this, and at high publishing rates it actively works against it: a
+          500 Hz ``joint_states`` would get a 2.8 ms bound while a 100 Hz one
+          gets 15 ms, i.e. the better-instrumented recording is judged harder.
+
+        So the period term is floored by a fraction of the control period, which
+        is the unit that actually matters downstream: the state must be
+        contemporaneous with the image it is paired with, and half a control
+        cycle is the point past which "same row" stops being true.  Setting
+        ``state_tolerance_ms`` pins an absolute value and bypasses both terms.
         """
         if self.state_tolerance_ms is not None:
             return self.state_tolerance_ms
-        return max(self.state_tolerance_periods * source_period_ms, 1.0)
+        floor_ms = STATE_TOLERANCE_CONTROL_FRACTION * 1000.0 / self.fps
+        return max(self.state_tolerance_periods * source_period_ms, floor_ms, 1.0)
 
 
 @dataclass

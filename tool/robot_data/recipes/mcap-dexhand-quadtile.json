@@ -1,0 +1,41 @@
+{
+  "name": "mcap-dexhand-quadtile",
+  "storage": "mcap",
+  "description": "MCAP dexterous-hand rig, all cameras composited into /quad_tile/compressed",
+
+  "_comment": [
+    "FREQUENTLY TUNED: the video block below; an explicit CLI flag always wins.",
+    "",
+    "The dexhand counterpart of mcap-gripper-quadtile: same hero3 mosaic layout, but",
+    "20-DoF hands instead of grippers, so state_dim is 54 rather than 16. Use",
+    "mcap-dexhand when the rig publishes one topic per camera."
+  ],
+  "video": {
+    "codec": "h264",
+    "crf": 20,
+    "gop": 2,
+    "pixel_format": "yuv420p"
+  },
+
+  "profile": "tj-dexhand-quadcam",
+  "alignment": {
+    "fps": 30,
+    "mode": "lerobot-loop",
+    "grid_anchor": "anchor-camera-ticks",
+    "action_gap_policy": "hold-last-command",
+    "missing_topic_policy": "fail",
+    "invalid_frame_policy": "fail",
+    "max_decode_errors": 0,
+    "max_tick_rate_deviation": 0.1
+  },
+
+  "notes": [
+    "Both hands publish joint_states in this generation, so end-effector observations",
+    "are measured rather than command echoes -- confirm via audit.end_effector_state_source",
+    "rather than assuming it, since the topic can still be empty in a given batch.",
+    "The mosaic is JPEG here, unlike express_raw's ~5 MB raw frames, so the recorder",
+    "is not blocked and the default state tolerance (1.5 joint_states periods) holds.",
+    "If a batch starts rejecting rows on arm_state, measure the staleness before",
+    "widening it -- see the notes in mcap-gripper-quadtile-raw for how."
+  ]
+}
