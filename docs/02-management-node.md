@@ -2,6 +2,8 @@
 
 `mgmt01` 同时运行 PostgreSQL、Redis、MLflow、Slurm Controller、Slurm Worker 和 leLab，并提供一张 RTX 4090 给 Slurm。本文中的命令除特别说明外，都在 `mgmt01` 的仓库根目录执行。
 
+向已经运行的集群加 GPU 节点不需要重做本文，见[向已有集群增加 GPU 节点](09-add-gpu-node.md)。
+
 ## 1. 安装前检查
 
 确认主机身份和站点配置：
@@ -18,9 +20,11 @@ editor config/site.env
 ```text
 hostname: mgmt01
 MANAGEMENT_IP=192.168.100.202
-GPU_NODE_NAMES="mgmt01 gpu01"
-GPU_NODE_IPS="192.168.100.202 192.168.100.215"
+GPU_NODE_NAMES="mgmt01 gpu01 gpu02 gpu03"
+GPU_NODE_IPS="192.168.100.202 192.168.100.215 192.168.100.216 192.168.100.217"
 ```
+
+两个列表按位置一一对应，长度必须相同，且**在所有主机上取值完全一致**。
 
 如果需要修改主机名：
 
@@ -39,11 +43,11 @@ timedatectl show --property=NTPSynchronized --value
 
 在继续前还要确认：
 
-- QNAP 已允许 `192.168.100.202` 和 `192.168.100.215` 访问 NFS；
+- QNAP 已允许**全部**节点 IP 访问 NFS；
 - `/`、Docker 和 PostgreSQL 所在磁盘空间足够；
 - NVIDIA 驱动正常；
 - `DATA_GID` 和 `TRAIN_UID` 未被其他账号占用；
-- 两台主机使用相同的 `config/site.env` 集群字段。
+- 所有主机使用相同的 `config/site.env` 集群字段。
 
 ## 2. 准备 Python 3.12 和前端工具链
 
@@ -105,7 +109,7 @@ Ubuntu 22.04 的 `slurm-wlm` 只用于让角色脚本完成基础准备，最终
 
 ```text
 先运行 10/20 基础角色脚本
-→ 两台主机安装相同的 Slurm 26.05.2 DEB
+→ 所有主机安装相同的 Slurm 26.05.2 DEB
 → 最后安装 Controller/Worker 配置
 ```
 
@@ -148,15 +152,15 @@ sudo -u robot-train /opt/robot-platform/train-venv/bin/python -c \
   'import torch, lerobot; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0))'
 ```
 
-期望 `torch.cuda.is_available()` 为 `True`。两台 Worker 的 `LEROBOT_GIT_REF`、训练环境路径和 Python 主版本必须一致。
+期望 `torch.cuda.is_available()` 为 `True`。**所有** Worker 的 `LEROBOT_GIT_REF`、训练环境路径和 Python 主版本必须一致。
 
 ## 6. 完成 Slurm
 
 此时先不要安装 leLab。按以下文档完成 Slurm：
 
-1. 两台主机安装 [Slurm 26.05.2](Slurm-INSTALL.md)；
+1. 所有主机安装 [Slurm 26.05.2](Slurm-INSTALL.md)；
 2. 按 [Slurm 集群收尾](06-cluster-finalization.md)渲染配置、分发 Munge 密钥；
-3. 从 `mgmt01` 对 `mgmt01` 和 `gpu01` 分别运行 GPU smoke test。
+3. 从 `mgmt01` 对每个节点分别运行 GPU smoke test。
 
 管理机最终应同时运行：
 
@@ -168,7 +172,7 @@ sinfo -N -l
 
 ## 7. 安装 leLab
 
-只有在两台节点均为 `idle` 且 GPU smoke test 成功后执行：
+只有在全部节点均为 `idle` 且 GPU smoke test 成功后执行：
 
 ```bash
 bash -n scripts/15-install-lelab-platform.sh
@@ -203,16 +207,18 @@ curl --noproxy '*' -fsS http://127.0.0.1:8000/cluster/status | jq
 
 ## 9. 端口和备份
 
-当前双节点最少需要：
+当前集群最少需要：
 
 | 端口 | 来源 | 目标 |
 |---|---|---|
-| TCP 22 | 管理员、`mgmt01` leLab | 两台主机 |
-| TCP 2049 | 两台主机 | QNAP |
-| TCP 6817 | `gpu01` | `mgmt01` |
-| TCP 6818 | `mgmt01` | 两台 Worker |
+| TCP 22 | 管理员、`mgmt01` leLab | 所有主机 |
+| TCP 2049 | 所有主机 | QNAP |
+| TCP 6817 | 所有 Worker | `mgmt01` |
+| TCP 6818 | `mgmt01` | 所有 Worker |
 | TCP 8000 | 小组内网 | `mgmt01` |
 | TCP 5000 | 试点期内网 | `mgmt01` |
+
+加节点时这几条都要覆盖新节点，QNAP 的 NFS 白名单也要加上它的 IP。
 
 PostgreSQL 5432、Redis 6379 和 Docker TCP API 不应对内网开放。
 

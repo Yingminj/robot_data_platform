@@ -123,6 +123,39 @@ def test_slurm_batch_script_redirects_caches_away_from_home(tmp_path) -> None:
     assert (cache_root / "home").is_dir()
 
 
+def test_slurm_batch_script_overrides_an_inherited_hf_home(tmp_path) -> None:
+    """sbatch exports the service's HF_HOME; a worker need not have that path."""
+
+    import os
+    import subprocess as sp
+
+    from lelab.runners.slurm import SlurmJobRunner
+
+    cache_root = tmp_path / "cache"
+    script_path = tmp_path / "job.sbatch"
+    script_path.write_text(SlurmJobRunner._batch_script(["env"]))
+
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    (stub_dir / "nvidia-smi").write_text("#!/bin/sh\nexit 0\n")
+    (stub_dir / "nvidia-smi").chmod(0o755)
+
+    env = {
+        **os.environ,
+        "HOME": "/nonexistent/robot-train",
+        # The management host's cache, under a root-owned parent the worker
+        # cannot write to.
+        "HF_HOME": "/nonexistent/robot-platform/huggingface",
+        "LELAB_JOB_CACHE_ROOT": str(cache_root),
+        "PATH": f"{stub_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+    }
+    result = sp.run(["bash", str(script_path)], env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert f"HF_HOME={cache_root}/huggingface" in result.stdout
+    assert (cache_root / "huggingface").is_dir()
+
+
 def test_slurm_batch_script_keeps_a_writable_home(tmp_path) -> None:
     """A worker that does have the home directory should keep using it."""
 

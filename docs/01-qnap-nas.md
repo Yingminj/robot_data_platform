@@ -30,8 +30,14 @@ NAS 是原始 H5、数据集版本、标注导出、MLflow artifact 和模型发
 |---|---|---|
 | `192.168.100.202` | mgmt01（管理 + GPU） | 读写 |
 | `192.168.100.215` | gpu01 | 读写 |
+| `192.168.100.216` | gpu02 | 读写 |
+| `192.168.100.217` | gpu03 | 读写 |
 
-当前两台机器使用同一个导出和挂载点 `/mnt/robot_platform`。以后增加 Worker 时，必须先把新节点的固定 IP 加入 QNAP 白名单。需要至少建立：
+所有机器使用同一个导出和挂载点 `/mnt/robot_platform`。
+
+> **增加 Worker 时必须先把新节点的固定 IP 加入本白名单。** 这一步最容易漏，现象是新节点 `findmnt /mnt/robot_platform` 无输出或挂载为只读，而作业提交时不报错，只在调度到该节点后才失败。
+
+需要至少建立：
 
 ```text
 datasets/
@@ -79,7 +85,7 @@ findmnt /mnt/robot_platform
 df -hT /mnt/robot_platform
 ```
 
-在 `mgmt01` 和 `gpu01` 分别确认挂载为 `rw`。使用平台训练账号验证：
+在**每台**主机分别确认挂载为 `rw`。使用平台训练账号验证：
 
 ```bash
 sudo -u robot-train test -r /mnt/robot_platform/datasets

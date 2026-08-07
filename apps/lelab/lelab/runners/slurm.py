@@ -116,6 +116,11 @@ class SlurmJobRunner:
             f"--cpus-per-task={template.cpus_per_task}",
             f"--mem={template.memory_gb}G",
             f"--nodelist={node.name}",
+            # Without this the job inherits the service's cwd, which exists only
+            # on the management host; slurmd logs a chdir error and silently
+            # falls back to /tmp. The job directory is on the NAS, so it is the
+            # same path on every worker.
+            f"--chdir={job_dir}",
             f"--output={self._slurm_output_path}",
             f"--error={self._slurm_output_path}",
             "--open-mode=append",
@@ -193,6 +198,11 @@ class SlurmJobRunner:
         an artifact at the first checkpoint is the second. Pin those caches to
         a directory that does exist on every node, and redirect ``HOME``
         itself when it is unusable so libraries that ignore XDG still work.
+
+        ``sbatch`` defaults to ``--export=ALL``, so the job also inherits the
+        service's own ``HF_HOME`` — a management-host path that a freshly added
+        worker will not have. ``LELAB_JOB_CACHE_ROOT`` therefore wins over the
+        inherited value rather than deferring to it.
         """
 
         command_line = shlex.join(command)
@@ -214,13 +224,28 @@ class SlurmJobRunner:
             "  fi\n"
             "fi\n"
             "export PYTHONUNBUFFERED=1\n"
-            'cache_root="${LELAB_JOB_CACHE_ROOT:-${HF_HOME:-}}"\n'
+            'cache_root="${LELAB_JOB_CACHE_ROOT:-}"\n'
             'if [ -n "$cache_root" ]; then\n'
-            '  export HF_HOME="${HF_HOME:-$cache_root/huggingface}"\n'
-            '  export TORCH_HOME="${TORCH_HOME:-$cache_root/torch}"\n'
-            '  export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$cache_root/xdg/cache}"\n'
-            '  export XDG_DATA_HOME="${XDG_DATA_HOME:-$cache_root/xdg/data}"\n'
-            '  export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$cache_root/xdg/config}"\n'
+            "  # An explicit job cache root overrides what sbatch inherited from the\n"
+            "  # service environment. HF_HOME there names a management-host-local\n"
+            "  # directory that a worker need not have -- and cannot create, since its\n"
+            "  # parent is root-owned -- so honouring it would send the job right back\n"
+            "  # to the path LELAB_JOB_CACHE_ROOT exists to avoid.\n"
+            '  export HF_HOME="$cache_root/huggingface"\n'
+            '  export TORCH_HOME="$cache_root/torch"\n'
+            '  export XDG_CACHE_HOME="$cache_root/xdg/cache"\n'
+            '  export XDG_DATA_HOME="$cache_root/xdg/data"\n'
+            '  export XDG_CONFIG_HOME="$cache_root/xdg/config"\n'
+            "else\n"
+            '  cache_root="${HF_HOME:-}"\n'
+            '  if [ -n "$cache_root" ]; then\n'
+            '    export TORCH_HOME="${TORCH_HOME:-$cache_root/torch}"\n'
+            '    export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$cache_root/xdg/cache}"\n'
+            '    export XDG_DATA_HOME="${XDG_DATA_HOME:-$cache_root/xdg/data}"\n'
+            '    export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$cache_root/xdg/config}"\n'
+            "  fi\n"
+            "fi\n"
+            'if [ -n "$cache_root" ]; then\n'
             '  if [ ! -w "${HOME:-}" ]; then export HOME="$cache_root/home"; fi\n'
             '  if ! mkdir -p "$HF_HOME" "$TORCH_HOME" "$XDG_CACHE_HOME" '
             '"$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$HOME"; then\n'

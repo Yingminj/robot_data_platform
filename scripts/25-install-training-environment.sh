@@ -22,7 +22,11 @@ apt-get update
 # the venv module package is version-specific too. Both are skipped gracefully
 # when the interpreter does not come from APT (e.g. conda).
 py_version="$("${python_bin}" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-packages=(git build-essential)
+# ffmpeg carries the libav* shared libraries torchcodec dlopens to decode the
+# dataset videos. Nothing pulls it in as a dependency: torchcodec ships its own
+# libtorchcodec_core*.so and only fails at the first training batch when the
+# matching libav* is absent, so a node missing it looks healthy until then.
+packages=(git build-essential ffmpeg)
 for pkg in "python${py_version}-venv" "python${py_version}-dev"; do
   if apt-cache show "${pkg}" >/dev/null 2>&1; then
     packages+=("${pkg}")
@@ -44,5 +48,9 @@ safe_install_dir "${PLATFORM_STATE_ROOT}/cache" "${TRAIN_USER}" "${DATA_GROUP}" 
 chown -R "${TRAIN_USER}:${DATA_GROUP}" "${TRAIN_ENV_ROOT}"
 runuser -u "${TRAIN_USER}" -- "${TRAIN_ENV_ROOT}/bin/python" -c \
   "import torch; assert torch.cuda.is_available(), 'PyTorch cannot access CUDA'; import lerobot"
+# The default video backend loads its FFmpeg bindings lazily, inside a dataloader
+# worker on the first batch. Import it here so a broken node fails the install.
+runuser -u "${TRAIN_USER}" -- "${TRAIN_ENV_ROOT}/bin/python" -c \
+  "from torchcodec.decoders import VideoDecoder"
 
 log "shared training environment installed at ${TRAIN_ENV_ROOT}"

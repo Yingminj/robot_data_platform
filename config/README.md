@@ -54,7 +54,9 @@ cp config/slurm/nodes.conf.example config/slurm/nodes.conf
 当前 leLab 节点映射中，左侧是 Slurm NodeName，右侧是 SSH 目标：
 
 ```bash
-LELAB_CLUSTER_NODES=mgmt01=192.168.100.202,gpu01=snorlax@192.168.100.215
+LELAB_CLUSTER_NODES=mgmt01=192.168.100.202,gpu01=snorlax@192.168.100.215,gpu02=yang@192.168.100.216,gpu03=snorlax@192.168.100.217
 ```
 
-完整 SSH 设置见 [leLab 集群 Web](../docs/07-lelab-cluster-web.md)。
+各节点的 SSH 用户不必相同（上例中 `gpu02` 是 `yang`）。这是很长的一行，用编辑器改，不要用 `sed` 一行命令——终端粘贴时的折行会让 `sed` 报 `unterminated 's' command`。改完必须 `sudo systemctl restart lelab-platform`，systemd 只在启动时读取 `EnvironmentFile`。
+
+完整 SSH 设置见 [leLab 集群 Web](../docs/07-lelab-cluster-web.md)；加节点的完整流程见 [向已有集群增加 GPU 节点](../docs/09-add-gpu-node.md)。

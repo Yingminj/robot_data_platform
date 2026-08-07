@@ -37,6 +37,7 @@ if [[ "${role}" == management ]]; then
   check "Slurm worker is active" systemctl is-active slurmd
   check "NVIDIA driver works" nvidia-smi
   check "training environment exists" test -x "${TRAIN_ENV_ROOT}/bin/python"
+  check "video decoder loads FFmpeg" "${TRAIN_ENV_ROOT}/bin/python" -c "from torchcodec.decoders import VideoDecoder"
   check "leLab is active" systemctl is-active lelab-platform
   check "MLflow health endpoint" curl -fsS --max-time 5 "http://${MANAGEMENT_IP}:5000/health"
   check "Slurm reports nodes" sinfo --noheader
@@ -52,6 +53,9 @@ if [[ "${role}" == gpu || "${role}" == combined ]]; then
   check "Slurm worker is active" systemctl is-active slurmd
   check "dataset cache exists" test -d "${DATASET_CACHE_ROOT}"
   check "training environment exists" test -x "${TRAIN_ENV_ROOT}/bin/python"
+  # torchcodec dlopens libav*; without the ffmpeg package the node passes every
+  # other check and only fails on a training job's first batch.
+  check "video decoder loads FFmpeg" "${TRAIN_ENV_ROOT}/bin/python" -c "from torchcodec.decoders import VideoDecoder"
   check "run work directory exists" test -d "${RUN_WORK_ROOT}"
 fi
 
