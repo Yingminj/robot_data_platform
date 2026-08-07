@@ -128,6 +128,21 @@ class MetricsHistoryPoint(BaseModel):
     grad_norm: float | None = None
 
 
+def seed_total_steps(record: JobRecord) -> None:
+    """Fill metrics.total_steps from the job's own config when nothing else has.
+
+    total_steps is otherwise only learned from tqdm's progress line, and
+    lerobot passes `disable=inside_slurm()` to tqdm — so a Slurm job never
+    prints one and the progress bar would sit on "Training starting…" for the
+    whole run. The requested step count is right there in the config; a
+    resumed run keeps counting towards the same total.
+    """
+    if record.runner == "imported":
+        return  # no training of its own — config is a placeholder
+    if record.metrics.total_steps <= 0 and record.config.steps > 0:
+        record.metrics.total_steps = record.config.steps
+
+
 def _pid_alive(pid: int) -> bool:
     """Return True if a process with this PID exists. Cheap; uses signal 0."""
     try:
@@ -158,6 +173,37 @@ _TQDM_RE = re.compile(r"Training:\s*\d+%[^|]*\|[^|]*\|\s*(\d+)/(\d+)\s*\[(?:[\d:
 # when it boots. We capture the first URL of that shape we see.
 _WANDB_URL_RE = re.compile(r"https://wandb\.ai/[^\s/]+/[^\s/]+/runs/[A-Za-z0-9]+")
 
+# lerobot renders every counter in its log lines through format_big_number(),
+# so a step only stays a plain integer below 1000: "step:750" but "step:1K",
+# "step:238K". Parsing it as int() therefore stops working at step 1000.
+_BIG_NUMBER_RE = re.compile(r"^([\d,]+(?:\.\d+)?)([KMBTQ])?$")
+_BIG_NUMBER_SCALE = {
+    None: 1,
+    "K": 1_000,
+    "M": 1_000_000,
+    "B": 1_000_000_000,
+    "T": 1_000_000_000_000,
+    "Q": 1_000_000_000_000_000,
+}
+
+
+def parse_big_number(token: str) -> int | None:
+    """Invert lerobot's `format_big_number()` for one counter token.
+
+    Returns None if the token isn't a number. Note that the formatter prints
+    abbreviated values with zero decimals, so anything past 999 round-trips
+    only to the nearest thousand (238,750 and 239,000 both arrive as "239K").
+    Good enough to keep the monitoring charts advancing; not an exact step.
+    """
+    match = _BIG_NUMBER_RE.match(token.strip())
+    if match is None:
+        return None
+    try:
+        value = float(match.group(1).replace(",", ""))
+    except ValueError:
+        return None
+    return round(value * _BIG_NUMBER_SCALE[match.group(2)])
+
 
 def extract_wandb_run_url(line: str) -> str | None:
     match = _WANDB_URL_RE.search(line)
@@ -182,8 +228,14 @@ def parse_metrics_into(line: str, metrics: TrainingMetrics) -> None:
 
     Two complementary sources:
       * tqdm progress for current_step + total_steps + ETA (~1s cadence).
+        lerobot disables its progress bar under Slurm, so for that runner this
+        source never fires and total_steps/ETA stay unset here.
       * 'INFO ... step:N smpl:... loss:X grdn:Y lr:Z ...' for loss/lr/grdn
         (only at log_freq cadence, default every 250 steps).
+
+    The log-freq step is abbreviated past 999 (see parse_big_number), so it
+    only moves current_step forward — never back over tqdm's exact count,
+    which would otherwise look like a new run to the monitoring charts.
     """
     try:
         tqdm_match = _TQDM_RE.search(line)
@@ -200,8 +252,9 @@ def parse_metrics_into(line: str, metrics: TrainingMetrics) -> None:
                 pass
 
         if "step:" in line and "loss:" in line:
-            with contextlib.suppress(ValueError):
-                metrics.current_step = int(line.split("step:")[1].split()[0].replace(",", ""))
+            step = parse_big_number(line.split("step:")[1].split()[0])
+            if step is not None and step >= metrics.current_step:
+                metrics.current_step = step
             with contextlib.suppress(ValueError):
                 metrics.current_loss = float(line.split("loss:")[1].split()[0])
             if "lr:" in line:
@@ -848,6 +901,7 @@ class JobRegistry:
                 runner=target.runner,
                 hf_flavor=target.flavor,
             )
+            seed_total_steps(record)
 
             job_dir.mkdir(parents=True, exist_ok=True)
             self._records[job_id] = record
@@ -1111,6 +1165,10 @@ class JobRegistry:
                     grad_norm=fresh.grad_norm,
                 )
                 # Dedupe by step: overwrite on consecutive same-step lines.
+                # Past step 1000 lerobot abbreviates the step to the nearest
+                # thousand, so with the default log_freq of 250 this keeps the
+                # newest of every ~4 lines and the curve resolution drops to
+                # one point per 1K steps.
                 if points and points[-1].step == point.step:
                     points[-1] = point
                 else:
@@ -1224,6 +1282,8 @@ class JobRegistry:
             except Exception as exc:
                 logger.warning("Skipping malformed job.json at %s: %s", meta, exc)
                 continue
+            # Also covers records persisted before total_steps was seeded.
+            seed_total_steps(record)
             if record.state == "running":
                 if record.runner == "local":
                     pid = record.process_pid
@@ -1421,4 +1481,5 @@ __all__ = [
     "JobNotRunningError",
     "job_registry",
     "parse_metrics_into",
+    "parse_big_number",
 ]

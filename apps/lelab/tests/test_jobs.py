@@ -70,6 +70,83 @@ def test_parse_metrics_into_extracts_tqdm_progress() -> None:
     assert m.eta_seconds == 270  # 4 min 30 s
 
 
+def test_parse_big_number_inverts_lerobot_formatting() -> None:
+    from lelab.jobs import parse_big_number
+
+    assert parse_big_number("750") == 750
+    assert parse_big_number("1K") == 1_000
+    assert parse_big_number("238K") == 238_000
+    assert parse_big_number("1.5M") == 1_500_000
+    assert parse_big_number("1,024") == 1_024
+    assert parse_big_number("nope") is None
+    assert parse_big_number("") is None
+
+
+def test_parse_metrics_into_reads_abbreviated_step() -> None:
+    """Past step 999 lerobot prints step:238K, which used to fail to parse and
+    freeze current_step (and with it the monitoring charts) at the last
+    sub-1000 log line."""
+    from lelab.jobs import TrainingMetrics, parse_metrics_into
+
+    m = TrainingMetrics()
+    line = (
+        "INFO 2026-08-06 20:32:02 ot_train.py:606 step:238K smpl:4M ep:2K "
+        "epch:60.68 loss:0.029 grdn:1.473 lr:1.0e-05"
+    )
+    parse_metrics_into(line, m)
+
+    assert m.current_step == 238_000
+    assert m.current_loss == pytest.approx(0.029)
+    assert m.current_lr == pytest.approx(1e-05)
+
+
+def test_parse_metrics_into_keeps_exact_tqdm_step_over_rounded_log_step() -> None:
+    """The log-freq step is rounded to the nearest 1K, so it must not drag
+    current_step backwards past tqdm's exact count — the frontend reads a
+    step regression as "a new run started" and clears the charts."""
+    from lelab.jobs import TrainingMetrics, parse_metrics_into
+
+    m = TrainingMetrics()
+    parse_metrics_into("Training:  12%|██░|  1234/10000 [00:30<04:30, 3.21it/s]", m)
+    parse_metrics_into("INFO ... step:1K smpl:8K loss:0.5 grdn:1.5 lr:0.0001", m)
+
+    assert m.current_step == 1234
+    assert m.current_loss == pytest.approx(0.5)
+
+
+def test_seed_total_steps_falls_back_to_config() -> None:
+    """lerobot disables tqdm under Slurm, so total_steps never arrives from the
+    log there; the configured step count stands in."""
+    from lelab.jobs import JobRecord, TrainingMetrics, seed_total_steps
+    from lelab.train import TrainingRequest
+
+    def record(**kwargs) -> JobRecord:
+        return JobRecord(
+            id="j",
+            name="j",
+            state="running",
+            config=TrainingRequest(dataset_repo_id="x", steps=300_000),
+            output_dir="/tmp/j",
+            started_at=0.0,
+            **kwargs,
+        )
+
+    slurm_job = record(runner="slurm")
+    seed_total_steps(slurm_job)
+    assert slurm_job.metrics.total_steps == 300_000
+
+    # A total already learned from tqdm wins — it describes the actual run,
+    # which for a resume is shorter than the configured count.
+    with_tqdm = record(runner="local", metrics=TrainingMetrics(total_steps=1_000))
+    seed_total_steps(with_tqdm)
+    assert with_tqdm.metrics.total_steps == 1_000
+
+    # Imported models never trained here; their config is a placeholder.
+    imported = record(runner="imported")
+    seed_total_steps(imported)
+    assert imported.metrics.total_steps == 0
+
+
 def test_parse_metrics_into_ignores_unrelated_lines() -> None:
     from lelab.jobs import TrainingMetrics, parse_metrics_into
 

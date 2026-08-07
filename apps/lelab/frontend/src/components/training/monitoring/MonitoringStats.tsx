@@ -106,8 +106,9 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
   }, [trainingStatus.current_step, trainingStatus.current_loss, trainingStatus.current_lr]);
 
   const progress = getProgressPercentage();
-  // Until tqdm fires its first progress line, total_steps is 0 — show
-  // "Training starting…" instead of a misleading 0/0 0% reading.
+  // total_steps is seeded from the job config on the backend, so 0 here means
+  // the record predates that or carries no step count — show "Training
+  // starting…" instead of a misleading 0/0 0% reading.
   const isStarting = trainingStatus.training_active && trainingStatus.total_steps === 0;
   const stepLabel = isStarting
     ? 'Training starting…'
