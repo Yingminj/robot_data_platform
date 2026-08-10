@@ -1,22 +1,24 @@
-# Slurm 集群收尾与验收
+# Slurm cluster finalization and acceptance
 
-本文是当前集群（`mgmt01` + `gpu01` + `gpu02` + `gpu03`）的权威配置顺序。所有“在管理机执行”的命令都从 `mgmt01` 仓库根目录运行；“在 Worker 执行”的命令都从对应 Worker 的仓库根目录运行。
+**English** | [简体中文](06-cluster-finalization.zh-CN.md)
 
-**向已经运行的集群加节点不要走本文流程**，看[向已有集群增加 GPU 节点](09-add-gpu-node.md)。
+This document is the authoritative configuration order for the current cluster (`mgmt01` + `gpu01` + `gpu02` + `gpu03`). Every command marked "on the management node" is run from the repository root on `mgmt01`; every command marked "on the worker" is run from the repository root on that worker.
 
-## 0. 完成条件
+**Do not follow this document to add a node to an already running cluster** — see [Adding a GPU node to an existing cluster](09-add-gpu-node.md).
 
-进入本阶段前：
+## 0. Entry conditions
 
-- `mgmt01` 已执行 `10` 和 `25`；
-- 每台 GPU Worker 已执行 `20` 和 `25`；
-- 所有机器已安装相同的 Slurm 26.05.2；
-- 所有机器都使用 cgroup v2；
-- 所有机器主机名、时间和 `/etc/hosts` 正确；
-- QNAP 在相同绝对路径 `/mnt/robot_platform` 挂载，且白名单包含全部节点 IP；
-- `robot-train` 和 `robotdata` 的数字 UID/GID 在所有机器上一致。
+Before starting this stage:
 
-在**每台**机器上快速核对：
+- `10` and `25` have been run on `mgmt01`;
+- `20` and `25` have been run on every GPU worker;
+- the same Slurm 26.05.2 is installed on every machine;
+- every machine uses cgroup v2;
+- hostnames, time and `/etc/hosts` are correct on every machine;
+- the QNAP is mounted at the same absolute path `/mnt/robot_platform` everywhere, and the allow list contains every node IP;
+- the numeric UID/GID of `robot-train` and `robotdata` are the same on every machine.
+
+Quick check on **every** machine:
 
 ```bash
 hostname -s
@@ -28,34 +30,34 @@ getent hosts mgmt01 gpu01 gpu02 gpu03
 findmnt /mnt/robot_platform
 ```
 
-`hostname -s` 的输出必须与将要写入 `nodes.conf` 的 NodeName 完全一致。
+The output of `hostname -s` must exactly match the NodeName that will be written into `nodes.conf`.
 
-此时 Worker 上执行 `sbatch --version` 会报 `DNS SRV lookup failed`，**这是正常的**：本机还没有 `/etc/slurm/slurm.conf`，新版 Slurm 回退到本集群不使用的 configless 发现。用 `/usr/sbin/slurmd -V` 查版本不受影响，装完配置后该报错消失。
+At this point `sbatch --version` on a worker reports `DNS SRV lookup failed`, **which is normal**: the machine has no `/etc/slurm/slurm.conf` yet, so newer Slurm falls back to the configless discovery this cluster does not use. Checking the version with `/usr/sbin/slurmd -V` is unaffected, and the error disappears once the configuration is installed.
 
-## 1. 收集节点资源
+## 1. Collect node resources
 
-**每台**主机分别执行：
+Run on **every** host separately:
 
 ```bash
 sudo slurmd -C
 ```
 
-在 `mgmt01` 复制模板：
+Copy the template on `mgmt01`:
 
 ```bash
 cp config/slurm/nodes.conf.example config/slurm/nodes.conf
 editor config/slurm/nodes.conf
 ```
 
-每行都应：
+Every line should:
 
-- 使用固定 `NodeName=`，与该机 `hostname -s` 相同；
-- 使用对应 `NodeAddr`；
-- 保留**该机自己** `slurmd -C` 的 CPU 拓扑；
-- 设置不高于 `slurmd -C` 实测值的 `RealMemory`；
-- 追加 `Gres=gpu:1 State=UNKNOWN`。
+- use a fixed `NodeName=` equal to that machine's `hostname -s`;
+- use the matching `NodeAddr`;
+- keep the CPU topology from **that machine's own** `slurmd -C`;
+- set `RealMemory` no higher than the value `slurmd -C` measured;
+- append `Gres=gpu:1 State=UNKNOWN`.
 
-当前结构示例：
+The current structure, as an example:
 
 ```ini
 NodeName=mgmt01 NodeAddr=192.168.100.202 CPUs=... RealMemory=61912 Gres=gpu:1 State=UNKNOWN
@@ -64,24 +66,24 @@ NodeName=gpu02 NodeAddr=192.168.100.216 CPUs=... RealMemory=61919 Gres=gpu:1 Sta
 NodeName=gpu03 NodeAddr=192.168.100.217 CPUs=... RealMemory=61914 Gres=gpu:1 State=UNKNOWN
 ```
 
-不要保留 `FILL_ME`。**各机 `RealMemory` 通常有几 MB 差异，不要为了整齐把一台的值复制给另一台**：填报值高于实测值会让节点进入 `INVAL`。
+Do not leave any `FILL_ME` behind. **`RealMemory` usually differs by a few MB between machines; do not copy one machine's value to another for the sake of tidiness** — a declared value above the measured one puts the node into `INVAL`.
 
-行数必须与 `config/site.env` 中 `GPU_NODE_NAMES` 的节点数相同，否则渲染脚本报：
+The number of lines must equal the number of nodes in `GPU_NODE_NAMES` in `config/site.env`, or the render script reports:
 
 ```text
 expected 4 nodes, found 2
 ```
 
-## 2. 渲染并审查配置
+## 2. Render and review the configuration
 
-在 `mgmt01`：
+On `mgmt01`:
 
 ```bash
 ./scripts/cluster/render-slurm-config.sh
 sed -n '1,240p' config/slurm/slurm.conf.generated
 ```
 
-确认：
+Confirm:
 
 ```bash
 ! grep -E 'FILL_ME|@@' config/slurm/slurm.conf.generated
@@ -89,15 +91,15 @@ grep -c '^NodeName=' config/slurm/slurm.conf.generated
 grep '^PartitionName=' config/slurm/slurm.conf.generated
 ```
 
-预期节点数与 `GPU_NODE_NAMES` 相同，且 `debug`、`train`、`eval` 三个分区都列出全部节点：
+The node count should match `GPU_NODE_NAMES`, and all three partitions `debug`, `train` and `eval` should list every node:
 
 ```ini
 PartitionName=debug Nodes=mgmt01,gpu01,gpu02,gpu03 Default=YES MaxTime=01:00:00 State=UP
 ```
 
-## 3. 安装 Controller 和 mgmt01 Worker
+## 3. Install the controller and the mgmt01 worker
 
-在 `mgmt01`：
+On `mgmt01`:
 
 ```bash
 sudo ./scripts/cluster/install-controller-config.sh \
@@ -105,17 +107,17 @@ sudo ./scripts/cluster/install-controller-config.sh \
   --apply
 ```
 
-> **参数顺序与编号脚本相反。** 这里配置文件路径是第一个参数，`--apply` 是第二个；而 `10`/`20`/`25` 等编号脚本把 `--apply` 放在第一位。只写 `sudo ./scripts/cluster/install-controller-config.sh --apply` 会把 `--apply` 当成配置文件名，然后输出与不带任何参数时相同的提示：
+> **The argument order is the reverse of the numbered scripts.** Here the configuration file path is the first argument and `--apply` is the second, whereas the numbered scripts such as `10`/`20`/`25` put `--apply` first. Writing only `sudo ./scripts/cluster/install-controller-config.sh --apply` makes `--apply` be read as the configuration filename, and the script prints the same message it prints with no arguments at all:
 >
 > ```text
 > This script changes the host. Re-run it with --apply after reviewing config/site.env.
 > ```
 >
-> 看到这句话不代表 `--apply` 写错了位置以外的问题，补上配置文件路径即可。
+> Seeing that line does not indicate any problem other than the misplaced `--apply`; just add the configuration file path.
 
-该脚本会重启 `slurmctld` **和 mgmt01 本机的 `slurmd`**，执行前先看 `squeue`：本机正在运行的作业会被中断。
+The script restarts `slurmctld` **and the local `slurmd` on mgmt01**, so check `squeue` before running it: jobs running on this machine will be interrupted.
 
-它会把以下文件装入 `/etc/slurm`：
+It installs the following files into `/etc/slurm`:
 
 ```text
 slurm.conf
@@ -123,7 +125,7 @@ cgroup.conf
 gres.conf
 ```
 
-并重启 `munge`、`slurmctld` 和本机 `slurmd`。检查：
+and restarts `munge`, `slurmctld` and the local `slurmd`. Check:
 
 ```bash
 systemctl is-active munge slurmctld slurmd
@@ -132,30 +134,30 @@ sudo slurmd -G
 scontrol ping
 ```
 
-## 4. 安装每台 Worker
+## 4. Install every worker
 
-**每一台** Worker 都必须获得与管理机完全相同的：
+**Every** worker must receive exactly the same:
 
-- `/etc/munge/munge.key`；
-- 生成的 `slurm.conf`；
-- 仓库中的 `cgroup.conf` 和 `gres.conf`。
+- `/etc/munge/munge.key`;
+- generated `slurm.conf`;
+- `cgroup.conf` and `gres.conf` from the repository.
 
-> **拓扑变化时，已有节点也要重新分发 `slurm.conf`。** Slurm 要求全集群配置逐字节一致。加节点后只更新新节点，已有节点手里仍是不含新节点的旧配置，控制器重新加载后它会失效。加节点的完整流程见[向已有集群增加 GPU 节点](09-add-gpu-node.md)。
+> **When the topology changes, `slurm.conf` must be redistributed to the existing nodes as well.** Slurm requires the configuration to be byte-for-byte identical cluster-wide. If only the new node is updated after adding it, the existing nodes still hold the old configuration without that node, and they fail once the controller reloads. The full add-a-node flow is in [Adding a GPU node to an existing cluster](09-add-gpu-node.md).
 
-Munge 密钥只能经管理员控制的临时通道传输，不能放入 Git、NAS 公共目录或聊天记录。具体的 `scp` 暂存命令见 [GPU Worker 安装：接收并安装集群配置](03-gpu-node.md#7-接收并安装集群配置)。
+The Munge key may only travel over a temporary channel the administrator controls; it must never go into Git, a public NAS directory or a chat log. The concrete `scp` staging commands are in [GPU worker installation: receive and install the cluster configuration](03-gpu-node.md#7-receive-and-install-the-cluster-configuration).
 
-在每台 Worker 上的调用形式是：
+The invocation on each worker is:
 
 ```bash
 sudo ./scripts/cluster/install-worker-config.sh \
-  <该Worker本机的munge.key路径> \
-  <该Worker本机的slurm.conf.generated路径> \
+  <local path to munge.key on that worker> \
+  <local path to slurm.conf.generated on that worker> \
   --apply
 ```
 
-前两个参数是位置参数，顺序不能交换；两个文件必须已经存在于**执行命令的那台机器**上。如果传入不存在的 `/secure/temp/...`，脚本只会输出 usage。
+The first two arguments are positional and cannot be swapped; both files must already exist on **the machine running the command**. If a non-existent `/secure/temp/...` is passed, the script only prints usage.
 
-安装过程中 `slurmd -G` 会输出一条 GRES 类型提示，**这是正常的**：
+During installation `slurmd -G` prints a GRES type notice, **which is normal**:
 
 ```text
 gres/gpu: _normalize_sys_gres_types: Could not find an unused configuration record
@@ -163,17 +165,17 @@ with a GRES type that is a substring of system device `nvidia_geforce_rtx_4090`.
 Setting system GRES type to NULL
 ```
 
-`gres.conf` 声明的是不带型号的 `Name=gpu`，NVML 报告的设备型号是 `nvidia_geforce_rtx_4090`，于是 Slurm 把类型置为 NULL，与 `nodes.conf` 中同样不带型号的 `Gres=gpu:1` 一致。紧随其后的这行才是结论：
+`gres.conf` declares `Name=gpu` with no model, NVML reports the device model as `nvidia_geforce_rtx_4090`, so Slurm sets the type to NULL — consistent with the equally model-free `Gres=gpu:1` in `nodes.conf`. The line right after it is the actual conclusion:
 
 ```text
 Gres Name=gpu Type=(null) Count=1 Index=0 File=/dev/nvidia0 Flags=HAS_FILE,ENV_NVML
 ```
 
-只有需要按型号申请（`--gres=gpu:rtx4090:1`）时才要改 `gres.conf`。
+`gres.conf` only needs changing if you want to request GPUs by model (`--gres=gpu:rtx4090:1`).
 
-## 5. 对比所有机器
+## 5. Compare all machines
 
-每台机器分别执行：
+Run on each machine:
 
 ```bash
 slurmd -V
@@ -185,9 +187,9 @@ sha256sum \
 sudo sha256sum /etc/munge/munge.key
 ```
 
-三份 Slurm 配置和 Munge key 的 checksum 必须在**所有**机器上分别一致。**只比对 checksum，不要发送 Munge key 内容。**
+The checksums of the three Slurm configuration files and of the Munge key must each be identical across **all** machines. **Compare checksums only; never send the contents of the Munge key.**
 
-在 `mgmt01`：
+On `mgmt01`:
 
 ```bash
 scontrol ping
@@ -197,16 +199,16 @@ scontrol show nodes
 squeue
 ```
 
-期望每个节点：
+Every node is expected to:
 
-- 在 `debug`、`train`、`eval` 三个分区中都是 `idle`；
-- GRES 包含 `gpu:1`；
-- 地址与 `nodes.conf` 中的 `NodeAddr` 一致；
-- CPU 和内存与各自配置一致。
+- be `idle` in all three partitions `debug`, `train` and `eval`;
+- have `gpu:1` in its GRES;
+- have an address matching `NodeAddr` in `nodes.conf`;
+- have CPU and memory matching its own configuration.
 
-## 6. cgroup v2 和 GPU 隔离检查
+## 6. cgroup v2 and GPU isolation checks
 
-每台机器分别检查：
+Check on each machine:
 
 ```bash
 stat -fc %T /sys/fs/cgroup
@@ -215,7 +217,7 @@ journalctl -u slurmd -b --no-pager | \
   grep -Ei 'cgroup|gres|gpu|error|fatal'
 ```
 
-`config/slurm/cgroup.conf` 当前启用：
+`config/slurm/cgroup.conf` currently enables:
 
 ```ini
 CgroupPlugin=autodetect
@@ -225,11 +227,11 @@ ConstrainDevices=yes
 ConstrainSwapSpace=yes
 ```
 
-`gres.conf` 使用 NVML 自动探测 `/dev/nvidia0`。如果 `slurmd -G` 报 GPU 数量或设备不匹配，先修正 NVIDIA 驱动和 `gres.conf`，不要直接把节点强制 RESUME。
+`gres.conf` uses NVML autodetection of `/dev/nvidia0`. If `slurmd -G` reports a mismatched GPU count or device, fix the NVIDIA driver and `gres.conf` first; do not simply force the node to RESUME.
 
-## 7. 逐节点 GPU smoke test
+## 7. Per-node GPU smoke test
 
-只在 `mgmt01` 执行：
+Run on `mgmt01` only:
 
 ```bash
 for node in mgmt01 gpu01 gpu02 gpu03; do
@@ -248,14 +250,14 @@ for node in mgmt01 gpu01 gpu02 gpu03; do
 done
 ```
 
-每个任务都必须：
+Every task must:
 
-- 在指定节点运行；
-- 只看到分配的 GPU；
-- `cuda=True`；
-- 成功导入 LeRobot。
+- run on the specified node;
+- see only the GPU it was allocated;
+- report `cuda=True`;
+- import LeRobot successfully.
 
-再确认各节点是**不同的物理机**：
+Then confirm the nodes really are **different physical machines**:
 
 ```bash
 for node in mgmt01 gpu01 gpu02 gpu03; do
@@ -264,9 +266,9 @@ for node in mgmt01 gpu01 gpu02 gpu03; do
 done
 ```
 
-返回的 GPU UUID 必须两两不同。**UUID 重复说明 `NodeAddr` 写错**，两个 NodeName 指向了同一台物理机——这时 `sinfo` 一切正常，只有 UUID 能发现问题。
+The returned GPU UUIDs must all differ. **A repeated UUID means `NodeAddr` is wrong** and two NodeNames point at the same physical machine — in that case `sinfo` looks perfectly fine and only the UUID reveals the problem.
 
-再做并行占用测试：
+Then run a concurrent-occupancy test:
 
 ```bash
 for node in mgmt01 gpu01 gpu02 gpu03; do
@@ -276,51 +278,51 @@ done
 wait
 ```
 
-过程中的这条警告可以忽略：
+This warning during the run can be ignored:
 
 ```text
 error: couldn't chdir to `/home/kewei/YING/robot_data_platform': No such file or directory: going to /tmp instead
 ```
 
-`srun` 会把提交端的当前目录传给远端，而该仓库路径只存在于 `mgmt01`。leLab 提交的作业使用绝对路径，不受影响；要消除警告可加 `--chdir=/tmp`。
+`srun` passes the submitting side's current directory to the remote end, and that repository path only exists on `mgmt01`. Jobs submitted by leLab use absolute paths and are unaffected; add `--chdir=/tmp` to silence the warning.
 
-## 8. 常见非正常状态
+## 8. Common abnormal states
 
-| 现象 | 优先检查 |
+| Symptom | Check first |
 |---|---|
-| `DOWN` / `NOT_RESPONDING` | `slurmd` 服务、6818、防火墙、主机名、时间 |
-| `INVAL` | `slurmd -C` 与 NodeName 行、RealMemory、CPU 拓扑 |
-| `Invalid generic resource` | `sudo slurmd -G`、`gres.conf`、NVML、`/dev/nvidia0` |
-| Munge 认证失败 | key checksum、`0400 munge:munge`、时间同步 |
-| cgroup 插件加载失败 | Slurm 版本、`cgroup2fs`、`cgroup_v2.so` |
-| 作业停在 `PENDING` | `scontrol show job <id>` 的 `Reason` |
-| 远端作业提示无法进入提交目录 | 属于正常警告，见第 7 节 |
-| 加节点后已有节点变 `DOWN` | 已有节点的 `slurm.conf` 未同步更新，见第 4 节 |
+| `DOWN` / `NOT_RESPONDING` | the `slurmd` service, port 6818, the firewall, hostname, time |
+| `INVAL` | `slurmd -C` against the NodeName line, RealMemory, CPU topology |
+| `Invalid generic resource` | `sudo slurmd -G`, `gres.conf`, NVML, `/dev/nvidia0` |
+| Munge authentication failure | key checksum, `0400 munge:munge`, time synchronization |
+| cgroup plugin fails to load | Slurm version, `cgroup2fs`, `cgroup_v2.so` |
+| job stuck in `PENDING` | the `Reason` in `scontrol show job <id>` |
+| remote job says it cannot enter the submission directory | a normal warning, see section 7 |
+| existing nodes go `DOWN` after adding a node | the existing nodes' `slurm.conf` was not updated, see section 4 |
 
-以下三类输出**不是**故障，不要据此重装：
+The following three kinds of output are **not** failures; do not reinstall because of them:
 
-| 输出 | 出现时机 | 说明 |
+| Output | When it appears | Explanation |
 |---|---|---|
-| `DNS SRV lookup failed` | Worker 装配置前执行 `sbatch --version` | 本机尚无 `slurm.conf`，回退到未使用的 configless 发现 |
-| `_normalize_sys_gres_types ... Setting system GRES type to NULL` | 每次 `slurmd -G` | `gres.conf` 用不带型号的 `Name=gpu`，与 `Gres=gpu:1` 一致 |
-| `couldn't chdir to ...: going to /tmp instead` | `srun` 从 `mgmt01` 仓库目录提交 | 提交端目录不存在于 Worker，作业本身不受影响 |
+| `DNS SRV lookup failed` | `sbatch --version` on a worker before the config is installed | the machine has no `slurm.conf` yet and falls back to the unused configless discovery |
+| `_normalize_sys_gres_types ... Setting system GRES type to NULL` | on every `slurmd -G` | `gres.conf` uses a model-free `Name=gpu`, consistent with `Gres=gpu:1` |
+| `couldn't chdir to ...: going to /tmp instead` | `srun` submitted from the repository directory on `mgmt01` | the submission directory does not exist on the worker; the job itself is unaffected |
 
-日志：
+Logs:
 
 ```bash
 # mgmt01
 journalctl -u slurmctld -u slurmd -u munge -n 150 --no-pager
 
-# 每台 Worker
+# every worker
 journalctl -u slurmd -u munge -n 150 --no-pager
 ```
 
-## 9. Slurm 完成后的下一步
+## 9. Next step after Slurm is done
 
-只有本页所有检查通过后，才在 `mgmt01` 安装 leLab：
+Only once every check on this page passes, install leLab on `mgmt01`:
 
 ```bash
 sudo ./scripts/15-install-lelab-platform.sh --apply
 ```
 
-接着完成 [leLab SSH 探测和 API 验收](07-lelab-cluster-web.md)，最后用 NAS 中的小型 LeRobot 数据集提交第一条短任务。
+Then complete [leLab SSH probing and API acceptance](07-lelab-cluster-web.md), and finally submit the first short job using a small LeRobot dataset on the NAS.

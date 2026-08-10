@@ -1,10 +1,12 @@
-# QNAP NAS 配置
+# QNAP NAS setup
 
-NAS 是原始 H5、数据集版本、标注导出、MLflow artifact 和模型发布包的权威文件存储，不运行 PostgreSQL、MLflow Server 或 Slurm。
+**English** | [简体中文](01-qnap-nas.zh-CN.md)
 
-## 1. 存储布局
+The NAS is the authoritative file storage for raw H5 files, dataset versions, annotation exports, MLflow artifacts and model release bundles. It does not run PostgreSQL, the MLflow server or Slurm.
 
-优先在 QNAP 中创建一个独立共享文件夹 `robot_platform`，与 `config/site.env.example` 中的 `NAS_EXPORT=/robot_platform` 一致。如果现阶段只能继续使用 `/kmd_data_file`，应创建专用子目录，并把 `NAS_EXPORT` 改成 QNAP 实际公布的 NFS 导出路径：
+## 1. Storage layout
+
+Preferably create a dedicated shared folder `robot_platform` on the QNAP, matching `NAS_EXPORT=/robot_platform` in `config/site.env.example`. If for now you have to keep using `/kmd_data_file`, create a dedicated subdirectory and change `NAS_EXPORT` to the NFS export path the QNAP actually publishes:
 
 ```text
 /kmd_data_file/robot-platform/
@@ -20,24 +22,24 @@ NAS 是原始 H5、数据集版本、标注导出、MLflow artifact 和模型发
 └── trash/
 ```
 
-不要把已有共享根目录中的其他项目迁移或改权限。平台目录应与现有数据隔离。
+Do not move other projects out of an existing share root or change their permissions. The platform directories should stay isolated from existing data.
 
-## 2. 第一阶段 NFS 服务
+## 2. Phase-one NFS service
 
-在 QTS 中启用 NFSv4，并为共享文件夹添加主机访问规则：
+Enable NFSv4 in QTS and add host access rules for the shared folder:
 
-| IP | 角色 | 试点权限 |
+| IP | Role | Pilot permission |
 |---|---|---|
-| `192.168.100.202` | mgmt01（管理 + GPU） | 读写 |
-| `192.168.100.215` | gpu01 | 读写 |
-| `192.168.100.216` | gpu02 | 读写 |
-| `192.168.100.217` | gpu03 | 读写 |
+| `192.168.100.202` | mgmt01 (management + GPU) | read/write |
+| `192.168.100.215` | gpu01 | read/write |
+| `192.168.100.216` | gpu02 | read/write |
+| `192.168.100.217` | gpu03 | read/write |
 
-所有机器使用同一个导出和挂载点 `/mnt/robot_platform`。
+All machines use the same export and the same mount point, `/mnt/robot_platform`.
 
-> **增加 Worker 时必须先把新节点的固定 IP 加入本白名单。** 这一步最容易漏，现象是新节点 `findmnt /mnt/robot_platform` 无输出或挂载为只读，而作业提交时不报错，只在调度到该节点后才失败。
+> **When adding a worker, its static IP must be added to this allow list first.** This is the easiest step to miss. The symptom is that `findmnt /mnt/robot_platform` prints nothing on the new node or the mount is read-only, while job submission raises no error — the failure only appears once a job is scheduled onto that node.
 
-需要至少建立：
+At minimum these must be created:
 
 ```text
 datasets/
@@ -45,39 +47,39 @@ jobs/
 mlflow-artifacts/
 ```
 
-试点阶段不要求 QNAP 按 Linux 数字 UID/GID 建立 ACL，也不做成员级权限。本部署保留 QNAP 默认的"映射所有用户到 guest"（all_squash）：所有平台账号（`robot-ingest`、`robot-train`、容器内进程）在 NAS 上统一按 `guest` 评估权限，目标是所有节点上的平台服务都能读取 `datasets`、写入各自的 `jobs/<job-id>`。仍建议只对白名单中的平台节点开放，而不是整个网段。
+The pilot phase does not require the QNAP to build ACLs from Linux numeric UIDs/GIDs, and does not use member-level permissions. This deployment keeps the QNAP default of "map all users to guest" (all_squash): every platform account (`robot-ingest`, `robot-train`, in-container processes) is evaluated on the NAS as `guest`, and the goal is simply that the platform services on all nodes can read `datasets` and write their own `jobs/<job-id>`. It is still recommended to open access only to the allow-listed platform nodes rather than to the whole subnet.
 
-all_squash 模式下需要确认：
+In all_squash mode, confirm the following:
 
-1. QTS → 控制台 → 权限 → 共享文件夹 → `robot_platform`：授予 `guest` 账号 **RW**（guest 默认常被拒绝，拒绝时所有平台账号的读写都会失败，且现象与 Linux 侧权限无关）。
-2. 骨架目录只需 guest 可写。由于所有客户端用户都被映射为 guest，目录属主为 guest 即可满足全部平台服务；可直接在任一挂载点创建：
+1. QTS → Control Panel → Privilege → Shared Folders → `robot_platform`: grant the `guest` account **RW** (guest is often denied by default; when it is denied, reads and writes fail for every platform account, with a symptom unrelated to Linux-side permissions).
+2. The skeleton directories only need to be writable by guest. Since all client users are mapped to guest, guest ownership of the directories is enough for every platform service; they can be created directly from any mount point:
 
    ```bash
    sudo mkdir -p /mnt/robot_platform/{incoming,raw,quarantine,annotations,datasets,jobs,mlflow-artifacts,model-releases,backups,trash}
    ```
 
-   若目录已存在但 guest 无权访问，应优先使用 QTS 的共享文件夹权限界面，把平台共享及这些专用子目录授权给 guest。客户端 root 也会被映射为 guest，通常无权在挂载端修改服务端属主。不要对整个已有共享执行递归 `chmod 0777`。
+   If the directories already exist but guest cannot access them, prefer the QTS shared-folder permission UI to grant guest access to the platform share and these dedicated subdirectories. The client's root is also mapped to guest and normally cannot change server-side ownership from the mount. Do not run a recursive `chmod 0777` over an entire existing share.
 
-3. 此模式下 NAS 上所有文件都归 guest 所有，无逐用户审计；数字 UID/GID ACL 和 setgid 约定推迟到数据治理阶段再启用。
+3. In this mode every file on the NAS is owned by guest and there is no per-user audit trail; numeric UID/GID ACLs and setgid conventions are deferred to the data governance phase.
 
-注意：Slurm 自身仍要求所有 Worker 上的训练账号 UID/GID 一致。`config/site.env` 中的 `TRAIN_UID` 和 `DATA_GID` 只解决 Slurm 运行身份，不参与本阶段的 NAS 权限设计。
+Note: Slurm itself still requires the training account to have the same UID/GID on all workers. `TRAIN_UID` and `DATA_GID` in `config/site.env` only settle the Slurm runtime identity and play no part in the NAS permission design at this stage.
 
-## 3. 数据保护
+## 3. Data protection
 
-至少配置：
+Configure at least:
 
-- 平台目录定时快照；
-- 快照保留策略；
-- 容量达到 70%、80%、90% 的分级告警；
-- 磁盘、RAID 和风扇健康告警；
-- PostgreSQL 备份目录的额外保留策略；
-- 第二台存储设备或离线介质上的第二副本。
+- scheduled snapshots of the platform directories;
+- a snapshot retention policy;
+- tiered capacity alerts at 70%, 80% and 90%;
+- disk, RAID and fan health alerts;
+- an additional retention policy for the PostgreSQL backup directory;
+- a second copy on a second storage device or on offline media.
 
-NAS 快照可以恢复误删，但不能替代独立备份。
+NAS snapshots can recover an accidental deletion, but they are not a substitute for an independent backup.
 
-## 4. NAS 验收
+## 4. NAS acceptance
 
-在管理机确认：
+On the management node, confirm:
 
 ```bash
 showmount -e 192.168.100.184
@@ -85,11 +87,11 @@ findmnt /mnt/robot_platform
 df -hT /mnt/robot_platform
 ```
 
-在**每台**主机分别确认挂载为 `rw`。使用平台训练账号验证：
+Confirm on **every** host that the mount is `rw`. Verify with the platform training account:
 
 ```bash
 sudo -u robot-train test -r /mnt/robot_platform/datasets
 sudo -u robot-train test -w /mnt/robot_platform/jobs
 ```
 
-QNAP 的 UID/GID 映射、细粒度 ACL 和原始数据保护在后续正式数据治理阶段处理，不作为第一阶段训练平台上线的前置条件。
+QNAP UID/GID mapping, fine-grained ACLs and raw data protection are handled in the later formal data governance phase and are not prerequisites for bringing the phase-one training platform online.

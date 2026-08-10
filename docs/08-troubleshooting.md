@@ -1,31 +1,33 @@
-# 安装与运行排障
+# Installation and runtime troubleshooting
 
-先根据故障所在层级定位，不要一看到 Web 异常就重装全部组件：
+**English** | [简体中文](08-troubleshooting.zh-CN.md)
+
+Locate the failure by layer first; do not reinstall every component the moment the web UI misbehaves:
 
 ```text
-主机/网络
-→ NFS、账号、时间
+host/network
+→ NFS, accounts, time
 → Munge
-→ Slurm Controller/Worker
-→ 统一训练环境
+→ Slurm controller/worker
+→ the shared training environment
 → leLab systemd
-→ leLab SSH GPU 探测
-→ 数据集与训练任务
+→ leLab SSH GPU probing
+→ datasets and training jobs
 ```
 
-## 0. 这些输出不是故障
+## 0. These outputs are not failures
 
-排查前先排除三条**正常但看起来像报错**的输出，它们曾多次导致无谓的重装：
+Before troubleshooting, rule out three outputs that are **normal but look like errors**. They have caused pointless reinstallations more than once:
 
-| 输出 | 出现时机 | 说明 |
+| Output | When it appears | Explanation |
 |---|---|---|
-| `DNS SRV lookup failed` / `Could not establish a configuration source` | Worker 装 Slurm 配置**之前**执行 `sbatch --version` | 新版 Slurm 打印版本前先加载配置，本机尚无 `/etc/slurm/slurm.conf`，回退到本集群不使用的 configless 发现。装完配置即消失。查版本用 `/usr/sbin/slurmd -V` |
-| `_normalize_sys_gres_types ... Setting system GRES type to NULL` | 每次 `slurmd -G` | `gres.conf` 用不带型号的 `Name=gpu`，NVML 报 `nvidia_geforce_rtx_4090`，于是类型置 NULL，与 `Gres=gpu:1` 一致。下一行 `Gres Name=gpu Type=(null) Count=1` 才是结论 |
-| `couldn't chdir to ...: going to /tmp instead` | 从 `mgmt01` 仓库目录 `srun` | 提交端当前目录不存在于 Worker。leLab 作业用绝对路径，不受影响。要消除可加 `--chdir=/tmp` |
+| `DNS SRV lookup failed` / `Could not establish a configuration source` | `sbatch --version` on a worker **before** the Slurm config is installed | newer Slurm loads a configuration before printing the version; this machine has no `/etc/slurm/slurm.conf` yet and falls back to the configless discovery this cluster does not use. It disappears once the config is installed. Use `/usr/sbin/slurmd -V` to check the version |
+| `_normalize_sys_gres_types ... Setting system GRES type to NULL` | on every `slurmd -G` | `gres.conf` uses a model-free `Name=gpu` while NVML reports `nvidia_geforce_rtx_4090`, so the type is set to NULL, consistent with `Gres=gpu:1`. The next line, `Gres Name=gpu Type=(null) Count=1`, is the actual conclusion |
+| `couldn't chdir to ...: going to /tmp instead` | `srun` from the repository directory on `mgmt01` | the submitting side's current directory does not exist on the worker. leLab jobs use absolute paths and are unaffected. Add `--chdir=/tmp` to silence it |
 
-## 1. 先收集最小状态
+## 1. Collect the minimum state first
 
-在 `mgmt01`：
+On `mgmt01`:
 
 ```bash
 hostname -s
@@ -40,7 +42,7 @@ curl --noproxy '*' -fsS http://127.0.0.1:8000/cluster/status | \
   jq -c '.nodes[] | {name,reachable,slurm_state,eligible,reason}'
 ```
 
-在**每台** Worker：
+On **every** worker:
 
 ```bash
 hostname -s
@@ -53,31 +55,31 @@ findmnt /mnt/robot_platform
 sha256sum /etc/slurm/slurm.conf
 ```
 
-最后一条的输出必须与 `mgmt01` 上完全相同。**全集群 `slurm.conf` 不一致是加节点后最常见的故障根因**，且现象（某个节点 `DOWN`）不指向配置。
+The output of the last command must be identical to the one on `mgmt01`. **An inconsistent cluster-wide `slurm.conf` is the most common root cause after adding a node**, and the symptom (one node `DOWN`) does not point at the configuration.
 
-## 2. Worker 安装脚本只输出 usage
+## 2. The worker installation script only prints usage
 
-报错：
+The error:
 
 ```text
 ERROR: usage: ./scripts/cluster/install-worker-config.sh \
 <secure-copy-of-munge.key> <slurm.conf.generated> --apply
 ```
 
-含义不是 `--apply` 换行错误，而是以下至少一项不成立：
+This does not mean `--apply` was line-wrapped wrongly; it means at least one of the following does not hold:
 
-- 第一个文件在当前 Worker 本机不存在或不可读；
-- 第二个文件在当前 Worker 本机不存在或不可读；
-- 第三个参数不是 `--apply`。
+- the first file does not exist on this worker or is unreadable;
+- the second file does not exist on this worker or is unreadable;
+- the third argument is not `--apply`.
 
-在 `gpu01` 检查：
+Check on `gpu01`:
 
 ```bash
 sudo test -r /home/snorlax/robot-platform-secure/munge.key
 sudo test -r /home/snorlax/robot-platform-secure/slurm.conf.generated
 ```
 
-正确调用：
+The correct invocation:
 
 ```bash
 sudo ./scripts/cluster/install-worker-config.sh \
@@ -86,62 +88,62 @@ sudo ./scripts/cluster/install-worker-config.sh \
   --apply
 ```
 
-`/secure/temp/...` 是占位符，不是脚本自动创建的目录。
+`/secure/temp/...` is a placeholder, not a directory the script creates.
 
-## 2b. Controller 安装脚本只输出 usage
+## 2b. The controller installation script only prints usage
 
 ```text
 This script changes the host. Re-run it with --apply after reviewing config/site.env.
 ```
 
-**`install-controller-config.sh` 的参数顺序与编号脚本相反**：配置文件路径是第一个参数，`--apply` 是第二个。只写 `--apply` 会被当成配置文件名，于是输出与不带参数时相同的提示。
+**The argument order of `install-controller-config.sh` is the reverse of the numbered scripts**: the configuration file path is the first argument and `--apply` is the second. Passing only `--apply` makes it be read as the configuration filename, so the script prints the same message as with no arguments at all.
 
 ```bash
-# 错误：--apply 被当作配置文件名
+# wrong: --apply is taken as the configuration filename
 sudo ./scripts/cluster/install-controller-config.sh --apply
 
-# 正确
+# correct
 sudo ./scripts/cluster/install-controller-config.sh \
   config/slurm/slurm.conf.generated \
   --apply
 ```
 
-`install-worker-config.sh` 同理：两个文件路径在前，`--apply` 在第三位。而 `10`/`20`/`25` 等编号脚本把 `--apply` 放在第一位。
+The same goes for `install-worker-config.sh`: the two file paths come first and `--apply` is third. The numbered scripts such as `10`/`20`/`25`, by contrast, put `--apply` first.
 
-## 2c. 渲染脚本报节点数不符
+## 2c. The render script reports a node count mismatch
 
 ```text
 expected 4 nodes, found 2
 ```
 
-`config/slurm/nodes.conf` 的 `NodeName=` 行数与 `config/site.env` 中 `GPU_NODE_NAMES` 的节点数不一致。加节点时通常是改了 `site.env` 但忘了往 `nodes.conf` 追加新行。
+The number of `NodeName=` lines in `config/slurm/nodes.conf` does not match the node count in `GPU_NODE_NAMES` in `config/site.env`. When adding a node this usually means `site.env` was updated but the new line was not appended to `nodes.conf`.
 
-相关的还有：
+Related errors:
 
-| 报错 | 原因 |
+| Error | Cause |
 |---|---|
-| `missing gpu02 in .../nodes.conf` | `nodes.conf` 缺该节点的行，或 NodeName 拼写与 `GPU_NODE_NAMES` 不一致 |
-| `nodes.conf still contains FILL_ME placeholders` | 新节点的硬件参数还没填，先在该节点跑 `sudo slurmd -C` |
-| `GPU_NODE_NAMES and GPU_NODE_IPS have different lengths` | 两个列表元素数不同，它们按位置一一对应 |
+| `missing gpu02 in .../nodes.conf` | the line for that node is missing from `nodes.conf`, or the NodeName spelling differs from `GPU_NODE_NAMES` |
+| `nodes.conf still contains FILL_ME placeholders` | the new node's hardware parameters have not been filled in; run `sudo slurmd -C` on that node first |
+| `GPU_NODE_NAMES and GPU_NODE_IPS have different lengths` | the two lists have different element counts; they correspond positionally |
 
-## 2d. 加节点后已有节点变成 DOWN
+## 2d. Existing nodes go DOWN after adding a node
 
-Slurm 要求全集群 `slurm.conf` 逐字节一致。只把新配置发给新节点时，已有节点手里仍是不含新节点的旧配置，控制器重新加载后它会失效。
+Slurm requires `slurm.conf` to be byte-for-byte identical cluster-wide. When only the new node gets the new configuration, the existing nodes still hold the old one without that node, and they fail once the controller reloads.
 
 ```bash
-# 在每台节点比对，必须全部相同
+# compare on every node; all must match
 sha256sum /etc/slurm/slurm.conf
 ```
 
-修复方式是把新渲染的 `slurm.conf.generated` 重新分发到**所有** Worker（Munge 密钥不变，无需重发），然后各自 `sudo systemctl restart slurmd`。完整流程见[向已有集群增加 GPU 节点](09-add-gpu-node.md)。
+The fix is to redistribute the newly rendered `slurm.conf.generated` to **all** workers (the Munge key is unchanged and does not need resending), then run `sudo systemctl restart slurmd` on each. The full flow is in [Adding a GPU node to an existing cluster](09-add-gpu-node.md).
 
-## 2e. /etc/hosts 托管块拒绝更新
+## 2e. The managed /etc/hosts block refuses to update
 
 ```text
 existing managed /etc/hosts block differs; review it manually
 ```
 
-`05-configure-hosts.sh` **不做增量修改**：它比较现有托管块与目标块，不一致就停止，防止覆盖人工调整。拓扑变更时先删除旧块再重新生成，在**每台**主机执行：
+`05-configure-hosts.sh` **makes no incremental edits**: it compares the existing managed block with the target block and stops when they differ, to avoid overwriting manual adjustments. When the topology changes, delete the old block first and regenerate it, on **every** host:
 
 ```bash
 sudo cp -a /etc/hosts /etc/hosts.bak.$(date +%Y%m%d%H%M%S)
@@ -150,11 +152,11 @@ sudo ./scripts/05-configure-hosts.sh --apply
 getent hosts mgmt01 gpu01 gpu02 gpu03
 ```
 
-另一种停止情况是块**外**已存在同名条目，提示 `/etc/hosts already contains gpu02`，需要先手工清理那条。
+The other stop condition is an entry with the same name that already exists **outside** the block, reported as `/etc/hosts already contains gpu02`; that line has to be cleaned up by hand first.
 
-## 3. Slurm cgroup v2 插件错误
+## 3. Slurm cgroup v2 plugin errors
 
-先检查版本和系统：
+Check the version and the system first:
 
 ```bash
 slurmd -V
@@ -162,25 +164,25 @@ stat -fc %T /sys/fs/cgroup
 find /usr/lib -type f -name cgroup_v2.so -print
 ```
 
-当前期望：
+Currently expected:
 
 ```text
 slurm 26.05.2
 cgroup2fs
 ```
 
-若仍是 Ubuntu 22.04 自带旧版，按 [Slurm 26.05.2 安装](Slurm-INSTALL.md)升级所有机器。不能只升级 Controller 或只升级部分 Worker。
+If the old version shipped with Ubuntu 22.04 is still in place, upgrade every machine following [Slurm 26.05.2 installation](Slurm-INSTALL.md). Upgrading only the controller, or only some workers, is not an option.
 
-## 4. Slurm 节点为 DOWN、INVAL 或 UNKNOWN
+## 4. A Slurm node is DOWN, INVAL or UNKNOWN
 
-在 `mgmt01`：
+On `mgmt01`:
 
 ```bash
 scontrol show node <NodeName>
 journalctl -u slurmctld -n 150 --no-pager
 ```
 
-在故障 Worker：
+On the failing worker:
 
 ```bash
 sudo slurmd -C
@@ -188,28 +190,28 @@ sudo slurmd -G
 journalctl -u slurmd -u munge -n 150 --no-pager
 ```
 
-逐项对比：
+Compare item by item:
 
-1. NodeName 与 `hostname -s`；
-2. `NodeAddr` 与固定 IP；
-3. CPU 拓扑和 `RealMemory`（**填报值高于 `slurmd -C` 实测值会导致 `INVAL`**，各机内存通常差几 MB，不要互相复制）；
-4. `slurm.conf`、`cgroup.conf`、`gres.conf` checksum 在**所有**节点一致；
-5. Munge key checksum、`munge:munge` 和 `0400`；
-6. 各机器时间；
-7. TCP 6817/6818；
-8. `sudo slurmd -G` 是否识别 `gpu:1`。
+1. NodeName against `hostname -s`;
+2. `NodeAddr` against the static IP;
+3. the CPU topology and `RealMemory` (**a declared value above what `slurmd -C` measured causes `INVAL`**; machines usually differ by a few MB, so do not copy values between them);
+4. the `slurm.conf`, `cgroup.conf` and `gres.conf` checksums being identical on **all** nodes;
+5. the Munge key checksum, `munge:munge` ownership and mode `0400`;
+6. the time on each machine;
+7. TCP 6817/6818;
+8. whether `sudo slurmd -G` recognizes `gpu:1`.
 
-第 4 项是加节点后最常见的原因，见 2d 节。
+Item 4 is the most common cause after adding a node — see section 2d.
 
-只有原因已经修复时才恢复节点：
+Resume a node only once the cause is actually fixed:
 
 ```bash
 sudo scontrol update NodeName=gpu02 State=RESUME
 ```
 
-## 5. NFS 已挂载但服务账号不能写
+## 5. NFS is mounted but the service account cannot write
 
-检查：
+Check:
 
 ```bash
 findmnt /mnt/robot_platform
@@ -218,33 +220,33 @@ sudo -u robot-train test -w /mnt/robot_platform/jobs
 sudo -u robot-ingest test -w /mnt/robot_platform/mlflow-artifacts
 ```
 
-当前 QNAP 使用 `all_squash` 时，Linux 本地 `chown` 通常不能解决问题，因为所有客户端账号都映射为 QNAP guest。应在 QNAP：
+While the QNAP uses `all_squash`, a local Linux `chown` usually does not help, because every client account is mapped to the QNAP guest. On the QNAP:
 
-- 确认客户端 IP 在 NFS 白名单；
-- 确认共享是 RW；
-- 给 guest 账号共享目录和子目录的读写权限。
+- confirm the client IP is in the NFS allow list;
+- confirm the share is RW;
+- give the guest account read/write permission on the share and its subdirectories.
 
-## 6. leLab 安装显示 Python 包成功，但最后 EOF
+## 6. The leLab installation reports the Python packages succeeded, then EOF
 
-曾出现：
+Seen once:
 
 ```text
 unexpected EOF while looking for matching `"'
 ```
 
-先检查当前仓库脚本：
+Check the current repository script first:
 
 ```bash
 bash -n scripts/15-install-lelab-platform.sh
 ```
 
-语法通过后重新执行：
+Once the syntax check passes, run it again:
 
 ```bash
 sudo ./scripts/15-install-lelab-platform.sh --apply
 ```
 
-`Successfully installed LeLab ...` 只证明 Python 安装阶段完成；还应确认：
+`Successfully installed LeLab ...` only proves the Python installation stage finished. Also confirm:
 
 ```bash
 test -r /etc/robot-platform/lelab.env
@@ -252,33 +254,33 @@ test -r /etc/systemd/system/lelab-platform.service
 systemctl is-active lelab-platform
 ```
 
-## 7. curl 本机 API 返回 502
+## 7. curl against the local API returns 502
 
-如果设置了 `http_proxy` 或 `https_proxy`，`curl` 可能把 `127.0.0.1` 请求发给代理。
+If `http_proxy` or `https_proxy` is set, `curl` may send even a `127.0.0.1` request to the proxy.
 
-检查：
+Check:
 
 ```bash
 env | grep -Ei '^(http|https|all|no)_proxy='
 ```
 
-访问本机服务时使用：
+When reaching local services, use:
 
 ```bash
 curl --noproxy '*' -fsS http://127.0.0.1:8000/health
 ```
 
-命令换行时，反斜杠 `\` 后面不能再有空格。
+When a command is wrapped across lines, there must be no space after the backslash `\`.
 
-## 8. ssh-copy-id 无法打开私钥
+## 8. ssh-copy-id cannot open the private key
 
-报错：
+The error:
 
 ```text
 failed to open ID file '/etc/robot-platform/lelab_ssh_key': Permission denied
 ```
 
-公钥存在但普通用户无权读取同名私钥。明确要求只复制公钥：
+The public key exists, but the ordinary user cannot read the private key of the same name. Ask explicitly for the public key only:
 
 ```bash
 ssh-copy-id \
@@ -287,21 +289,21 @@ ssh-copy-id \
   snorlax@192.168.100.215
 ```
 
-私钥应继续保持：
+The private key must stay:
 
 ```text
 robot-train:robotdata 0600
 ```
 
-不要为了让 `ssh-copy-id` 安静而放宽私钥权限。
+Do not loosen the private key permissions just to quiet `ssh-copy-id`.
 
-## 9. leLab 报 Host key verification failed
+## 9. leLab reports Host key verification failed
 
-这条与 `Permission denied` 无关：**缺的是 `mgmt01` 上 `robot-train` 的 known_hosts 条目**，不是远端公钥。为真正发起连接的服务账号配置 known_hosts，完整指纹核对步骤见 [leLab 主机指纹配置](07-lelab-cluster-web.md#5-验证并安装-worker-主机指纹)。
+This has nothing to do with `Permission denied`: **what is missing is the known_hosts entry for `robot-train` on `mgmt01`**, not the remote public key. Configure known_hosts for the service account that actually initiates the connection; the full fingerprint verification steps are in [leLab host fingerprint configuration](07-lelab-cluster-web.md#5-verify-and-install-the-worker-host-fingerprints).
 
-要点：逐台扫描到独立文件，**不要加 `-H`**（哈希后无法与节点上看到的指纹对应，也无法去重），只比对 `SHA256:` 字段，核对通过后用 `sudo -u robot-train tee -a` **追加**而不是覆盖。
+Key points: scan one node at a time into a separate file, **do not add `-H`** (a hashed line cannot be matched against the fingerprint seen on the node, nor deduplicated), compare only the `SHA256:` field, and once verified, **append** with `sudo -u robot-train tee -a` rather than overwriting.
 
-验证必须使用与 systemd 相同的身份：
+Verification must use the same identity as systemd:
 
 ```bash
 sudo -H -u robot-train ssh \
@@ -311,37 +313,37 @@ sudo -H -u robot-train ssh \
   nvidia-smi -L
 ```
 
-普通用户自己能 SSH 不代表 `robot-train` 能 SSH。
+Your own user being able to SSH does not mean `robot-train` can.
 
-## 9b. leLab 报 Permission denied (publickey,password)
+## 9b. leLab reports Permission denied (publickey,password)
 
 ```json
 {"name":"gpu02","reachable":false,"reason":"yang@192.168.100.216: Permission denied (publickey,password)."}
 ```
 
-**这条报错说明 host key 已经通过**，不要再动 known_hosts。缺的是远端 `authorized_keys` 里的 leLab 公钥。
+**This error means the host key already passed** — leave known_hosts alone. What is missing is the leLab public key in the remote `authorized_keys`.
 
-在 `mgmt01`：
+On `mgmt01`:
 
 ```bash
 cat /etc/robot-platform/lelab_ssh_key.pub
 ssh-copy-id -f -i /etc/robot-platform/lelab_ssh_key.pub yang@192.168.100.216
 ```
 
-`-f` 不能省，否则 `ssh-copy-id` 会尝试读取只有 `robot-train` 能读的同名私钥。手工粘贴时注意公钥不能折行，用 `ssh-keygen -lf ~/.ssh/authorized_keys` 验证。
+`-f` cannot be omitted, otherwise `ssh-copy-id` tries to read the private key of the same name, which only `robot-train` can read. When pasting by hand, make sure the public key does not wrap, and verify with `ssh-keygen -lf ~/.ssh/authorized_keys`.
 
-装好后不需要重启 leLab，`/cluster/status` 每次请求都会实时探测。
+Once installed, leLab does not need restarting — `/cluster/status` probes live on every request.
 
-与 `Host key verification failed` 的区别：
+The difference from `Host key verification failed`:
 
-| 报错 | 缺的是 |
+| Error | What is missing |
 |---|---|
-| `Permission denied (publickey,password)` | 远端 `authorized_keys` 中的公钥 |
-| `Host key verification failed` | `mgmt01` 上 `robot-train` 的 known_hosts 条目 |
+| `Permission denied (publickey,password)` | the public key in the remote `authorized_keys` |
+| `Host key verification failed` | the known_hosts entry for `robot-train` on `mgmt01` |
 
-## 10. 节点 reachable 但 eligible 为 false
+## 10. A node is reachable but eligible is false
 
-示例：
+Example:
 
 ```json
 {
@@ -353,9 +355,9 @@ ssh-copy-id -f -i /etc/robot-platform/lelab_ssh_key.pub yang@192.168.100.216
 }
 ```
 
-这说明 SSH 和 GPU 探测已经成功，但 GPU 上存在 CUDA compute process。因为 Slurm 同时显示 `idle`，通常是 Slurm 外的手动进程。
+This means SSH and GPU probing already succeeded, but there is a CUDA compute process on the GPU. Since Slurm also reports `idle`, it is usually a manual process outside Slurm.
 
-定位：
+To investigate:
 
 ```bash
 sudo -H -u robot-train ssh \
@@ -367,48 +369,48 @@ sudo -H -u robot-train ssh \
     --format=csv,noheader,nounits
 ```
 
-到该节点查看 PID：
+Inspect the PID on that node:
 
 ```bash
 ps -o user,pid,ppid,lstart,cmd -p <PID>
 ```
 
-不要终止未知进程。确认是过期任务后，由进程所有者停止。进程消失后重新请求 API，不需要重启 leLab。
+Do not kill an unknown process. Once confirmed to be a stale job, have its owner stop it. After the process disappears, request the API again — leLab does not need restarting.
 
-如果占用者是远程桌面类工具（RustDesk、TeamViewer、向日葵等），正确做法不是关掉它，而是把进程名加入 `apps/lelab/lelab/cluster.py` 中 `_probe_node` 的 `graphics_patterns` 白名单。`rustdesk` 已在其中，所以 `mgmt01` 即使运行它，`compute_processes` 也是 0。
+If the occupant is a remote desktop tool (RustDesk, TeamViewer, Sunlogin and similar), the right fix is not to close it but to add the process name to the `graphics_patterns` allow list in `_probe_node` in `apps/lelab/lelab/cluster.py`. `rustdesk` is already there, which is why `compute_processes` is 0 on `mgmt01` even while it runs.
 
-### 与调度的关系
+### Relationship to scheduling
 
-`eligible: false` 的节点**不会被 `auto` 选中**，但仍可在页面上手动指定，Slurm 也照常接受 `srun`/`sbatch`。因此 `sinfo` 显示 `idle` 与 leLab 显示不可用并不矛盾——前者看 Slurm 分配状态，后者额外看 GPU 上有没有 Slurm 外的进程。
+A node with `eligible: false` **will not be picked by `auto`**, but it can still be selected manually in the UI, and Slurm still accepts `srun`/`sbatch` for it as usual. So `sinfo` reporting `idle` while leLab reports unavailable is not a contradiction — the former looks at Slurm allocation state, the latter additionally looks at whether a non-Slurm process is on the GPU.
 
-## 11. SSH 地址与 Slurm 节点名混淆
+## 11. Confusing the SSH address with the Slurm node name
 
-正确：
+Correct:
 
 ```bash
 LELAB_CLUSTER_NODES=mgmt01=192.168.100.202,gpu01=snorlax@192.168.100.215,gpu02=yang@192.168.100.216,gpu03=snorlax@192.168.100.217
 ```
 
-左边是 Slurm NodeName，右边是 SSH 目标。注意 `gpu02` 用的是 `yang`，与另两台不同——**各节点的 SSH 用户不必相同**。以下做法错误：
+The left side is the Slurm NodeName, the right side is the SSH target. Note that `gpu02` uses `yang`, unlike the other two — **the SSH user does not have to be the same on every node**. The following are all wrong:
 
 ```text
-把 Slurm NodeName 改成 snorlax@192.168.100.215
-把 /etc/hosts 中 gpu02 映射写成包含用户的字符串
-假定 SSH 用户一定与 NodeName 相同
-假定所有节点的 SSH 用户都一样
+changing the Slurm NodeName into snorlax@192.168.100.215
+writing the gpu02 mapping in /etc/hosts as a string that includes a user
+assuming the SSH user must equal the NodeName
+assuming every node uses the same SSH user
 ```
 
-## 11b. 长命令粘贴导致的两类事故
+## 11b. Two kinds of accident caused by pasting long commands
 
-终端粘贴长命令时会在任意位置插入换行，这在本项目里造成过两次真实事故，都值得单独记住。
+Pasting a long command into a terminal inserts a newline at an arbitrary position. This has caused two real accidents in this project, and both are worth remembering individually.
 
-### sed 表达式被截断
+### A truncated sed expression
 
 ```text
 sed: -e expression #1, char 85: unterminated `s' command
 ```
 
-`LELAB_CLUSTER_NODES` 这类很长的单行值，**用编辑器改，不要用 `sed` 一行命令**。必须用命令行时拆成短片段拼装，执行前先 `echo` 确认是完整一行：
+For a very long single-line value such as `LELAB_CLUSTER_NODES`, **edit it in an editor, not with a one-line `sed`**. When the command line is unavoidable, assemble it from short fragments and `echo` it first to confirm it is one complete line:
 
 ```bash
 N='mgmt01=192.168.100.202'
@@ -419,58 +421,57 @@ echo "$N"
 sudo sed -i "s|^LELAB_CLUSTER_NODES=.*|LELAB_CLUSTER_NODES=$N|" /etc/robot-platform/lelab.env
 ```
 
-`sed` 脚本这里必须用双引号，`$N` 需要展开。
+The `sed` script must use double quotes here, because `$N` has to expand.
 
-同类问题还有 SSH 公钥：`authorized_keys` 中被折行的公钥**永远匹配不上，且没有任何报错**，现象是 `Permission denied (publickey)`。用 `ssh-keygen -lf ~/.ssh/authorized_keys` 确认每行都能解析。
+The same class of problem hits SSH public keys: a wrapped public key in `authorized_keys` **can never match, with no error at all**, and the symptom is `Permission denied (publickey)`. Use `ssh-keygen -lf ~/.ssh/authorized_keys` to confirm every line parses.
 
-### 变量未设置导致写入根目录
+### An unset variable writing into the root directory
 
-分发 Munge 密钥时，如果只粘贴了后半段而漏掉 `stage_dir="$(mktemp -d)"`：
+When distributing the Munge key, if only the second half is pasted and `stage_dir="$(mktemp -d)"` is missed:
 
 ```bash
 sudo install -o "$USER" -g "$(id -gn)" -m 0600 /etc/munge/munge.key "$stage_dir/munge.key"
 ```
 
-`$stage_dir` 为空，路径变成 `/munge.key`，而这条带 `sudo`，会**静默成功**，把集群唯一的认证密钥写到文件系统根目录。紧接着不带 `sudo` 的那条才会报 `install: cannot create regular file '/slurm.conf.generated': Permission denied`——报错的是后一条，出问题的是前一条。
+`$stage_dir` is empty, the path becomes `/munge.key`, and because this line runs under `sudo` it **silently succeeds**, writing the cluster's unique authentication key into the filesystem root. Only the next line, which has no `sudo`, reports `install: cannot create regular file '/slurm.conf.generated': Permission denied` — the error comes from the second line while the damage was done by the first.
 
-检查并销毁：
+Check and destroy it:
 
 ```bash
 ls -l /munge.key && sudo shred -u /munge.key
 ```
 
-文档中的分发命令一律写成 `"${stage_dir:?}/munge.key"`。`:?` 会让 bash 在变量为空时立即报 `stage_dir: parameter null or not set` 并终止，不要删掉它。
+The distribution commands in this documentation are always written as `"${stage_dir:?}/munge.key"`. The `:?` makes bash report `stage_dir: parameter null or not set` and abort immediately when the variable is empty — do not remove it.
 
-## 12. Slurm 远端提示无法进入提交目录
+## 12. Slurm reports it cannot enter the submission directory on the remote side
 
 ```text
 error: couldn't chdir to `/home/kewei/YING/robot_data_platform': No such file or directory: going to /tmp instead
 ```
 
-**这是警告不是失败。** `srun`/`sbatch` 默认继承提交端当前目录，而该仓库路径只存在于 `mgmt01`。
+**This is a warning, not a failure.** `srun`/`sbatch` inherit the submitting side's current directory by default, and that repository path only exists on `mgmt01`.
 
-临时 smoke test 可显式指定所有 Worker 都存在的目录：
+For an ad hoc smoke test, name a directory that exists on every worker:
 
 ```bash
-srun --chdir=/tmp <其他参数> <命令>
+srun --chdir=/tmp <other arguments> <command>
 ```
 
-正式 leLab 任务的脚本、日志和输出都用绝对路径：
+Real leLab jobs use absolute paths for the script, the logs and the output:
 
 ```text
 /mnt/robot_platform/jobs/<job-id>
 ```
 
-该绝对路径必须在**每台** Worker 上一致。若训练实际失败，检查 `job.sbatch`、`slurm.out` 和 `scontrol show job <id>`，不要只根据 chdir 警告判断失败原因。
+That absolute path must be the same on **every** worker. If training really fails, check `job.sbatch`, `slurm.out` and `scontrol show job <id>`; do not diagnose the failure from the chdir warning alone.
 
-leLab 自己提交的作业现在带 `--chdir=/mnt/robot_platform/jobs/<job-id>`，不会再打印这条警告；服务的
-`WorkingDirectory=/opt/robot-platform/lelab` 只存在于 `mgmt01`。若仍然看到它，说明服务还没重启到新版本。
+Jobs submitted by leLab now carry `--chdir=/mnt/robot_platform/jobs/<job-id>` and no longer print this warning; the service's `WorkingDirectory=/opt/robot-platform/lelab` only exists on `mgmt01`. If you still see it, the service has not been restarted onto the new version.
 
-## 12b. 作业提交成功但在某个节点启动即失败
+## 12b. A job is submitted successfully but fails immediately on one node
 
-作业调度到新加的节点后立刻失败，而在旧节点正常，通常是该节点缺少运行期目录。这类问题**提交时不报错**，只在落到该节点时才暴露。
+A job that fails right after being scheduled onto a newly added node while working fine on the older ones usually means that node is missing a runtime directory. This class of problem **raises no error at submission time** and only surfaces once the job lands on that node.
 
-在该节点检查：
+Check on that node:
 
 ```bash
 sudo -u robot-train test -w /var/lib/robot-platform/cache && echo cache OK
@@ -482,49 +483,44 @@ sudo -u robot-train /opt/robot-platform/train-venv/bin/python -c \
   'from torchcodec.decoders import VideoDecoder; print("decoder OK")'
 ```
 
-最后一项失败见 12b-2：缺的是系统 `ffmpeg` 包，而不是 Python 依赖。
+For a failure on the last one, see 12b-2: what is missing is the system `ffmpeg` package, not a Python dependency.
 
-`/var/lib/robot-platform/cache` 是 `LELAB_JOB_CACHE_ROOT`。Slurm 把 `HOME` 指向 `robot-train` 的家目录，而它在 Worker 上并不存在，缓存到 `~` 的作业会失败。补建：
+`/var/lib/robot-platform/cache` is `LELAB_JOB_CACHE_ROOT`. Slurm points `HOME` at the `robot-train` home directory, which does not exist on the workers, so a job that caches into `~` fails. Create it:
 
 ```bash
 sudo install -d -o robot-train -g robotdata -m 0750 /var/lib/robot-platform/cache
 ```
 
-NAS 未挂载或只读时，先确认 QNAP 的 NFS 白名单包含**这台**节点的 IP。
+When the NAS is not mounted or is read-only, first confirm the QNAP NFS allow list contains the IP of **this** node.
 
-### 12b-1. `Cannot create the job cache under '/var/lib/robot-platform/cache'`，但该目录明明存在且可写
+### 12b-1. `Cannot create the job cache under '/var/lib/robot-platform/cache'`, when that directory clearly exists and is writable
 
-报错信息指向 `LELAB_JOB_CACHE_ROOT`，实际失败的却是上一行 `mkdir` 打印的另一个路径：
+The error message points at `LELAB_JOB_CACHE_ROOT`, but what actually failed is the different path printed by the `mkdir` on the line above:
 
 ```text
-mkdir: 无法创建目录 "/var/lib/robot-platform/huggingface": 权限不够
+mkdir: cannot create directory '/var/lib/robot-platform/huggingface': Permission denied
 Cannot create the job cache under '/var/lib/robot-platform/cache' on gpu03;
 ```
 
-`sbatch` 默认 `--export=ALL`，作业会继承 leLab 服务自己的 `HF_HOME`
-（`/etc/robot-platform/lelab.env` 里的 `/var/lib/robot-platform/huggingface`）。那是**管理节点本地**
-的缓存路径，新 Worker 上没有，而其父目录 `/var/lib/robot-platform` 属 root、`robot-train` 无法创建 ——
-于是 `mkdir -p` 整条失败。`cache` 目录本身没有问题，它下面的 `torch`、`xdg`、`home` 都已建好。
+`sbatch` defaults to `--export=ALL`, so the job inherits the leLab service's own `HF_HOME` (`/var/lib/robot-platform/huggingface` from `/etc/robot-platform/lelab.env`). That is a cache path **local to the management node**; it does not exist on a new worker, and its parent `/var/lib/robot-platform` is owned by root so `robot-train` cannot create it — the whole `mkdir -p` therefore fails. The `cache` directory itself is fine, and `torch`, `xdg` and `home` under it have already been created.
 
-**先看 `mkdir` 那一行报的具体路径，不要只看第二行的汇总信息。**
+**Read the specific path in the `mkdir` line, not just the summary on the second line.**
 
-修复已在 `apps/lelab/lelab/runners/slurm.py` 里：`LELAB_JOB_CACHE_ROOT` 一旦设置就覆盖继承来的
-`HF_HOME`，缓存全部落在 `$LELAB_JOB_CACHE_ROOT/` 下。重启服务生效：
+The fix is already in `apps/lelab/lelab/runners/slurm.py`: once `LELAB_JOB_CACHE_ROOT` is set it overrides the inherited `HF_HOME`, so all caches land under `$LELAB_JOB_CACHE_ROOT/`. Restart the service to pick it up:
 
 ```bash
 sudo systemctl restart lelab-platform
 ```
 
-若暂时不能重启服务，在该节点补建目录也能绕过：
+If the service cannot be restarted right now, creating the directory on that node also works around it:
 
 ```bash
 sudo install -d -o robot-train -g robotdata -m 0750 /var/lib/robot-platform/huggingface
 ```
 
-### 12b-2. 训练开始后立刻 `RuntimeError: Could not load libtorchcodec`
+### 12b-2. `RuntimeError: Could not load libtorchcodec` right after training starts
 
-日志已经打印到 `Start offline training on a fixed dataset`、`num_learnable_params` 等行，说明配置、
-数据集、GPU 都正常，随后第一个 batch 在 DataLoader worker 里抛出：
+The log has already printed `Start offline training on a fixed dataset`, `num_learnable_params` and similar lines, so the configuration, the dataset and the GPU are all fine; then the first batch throws inside a DataLoader worker:
 
 ```text
 RuntimeError: Caught RuntimeError in DataLoader worker process 0.
@@ -538,23 +534,18 @@ FFmpeg version 4:
 OSError: libavdevice.so.58: cannot open shared object file: No such file or directory
 ```
 
-torchcodec 会依次尝试 FFmpeg 4/5/6/7/8 五个版本。**Ubuntu 22.04 只有 FFmpeg 4.4，所以只有最后一段
-`FFmpeg version 4` 的报错是真实原因，前四段必然失败、可以忽略。** 报错提到的 PyTorch 版本不兼容
-（第 2 条）通常也是误导。
+torchcodec tries FFmpeg versions 4, 5, 6, 7 and 8 in turn. **Ubuntu 22.04 only has FFmpeg 4.4, so only the last block, `FFmpeg version 4`, is the real cause; the first four are bound to fail and can be ignored.** The incompatible-PyTorch-version suggestion in the error (item 2) is usually misleading too.
 
-真实原因是该节点缺少系统 `ffmpeg` 包。torchcodec 自带 `libtorchcodec_core*.so`，但其依赖的
-`libav*.so` 来自系统，没有任何 pip 依赖会安装它。棘手之处在于其他包会顺带装上
-`libavcodec58`、`libavformat58`、`libavutil56`，唯独 `libavdevice58` 只由 `ffmpeg` 提供 ——
-节点看起来"有 ffmpeg 库"，实际缺的就是这一个。
+The real cause is that the node is missing the system `ffmpeg` package. torchcodec ships its own `libtorchcodec_core*.so`, but the `libav*.so` libraries it depends on come from the system, and no pip dependency installs them. The tricky part is that other packages incidentally pull in `libavcodec58`, `libavformat58` and `libavutil56`, while `libavdevice58` is provided only by `ffmpeg` — so the node looks like it "has the ffmpeg libraries" while missing exactly that one.
 
-确认（在出问题的节点上，与正常节点对比）：
+Confirm it (on the failing node, compared against a healthy one):
 
 ```bash
-ls /usr/lib/x86_64-linux-gnu/libavdevice.so.58   # 缺失即是此问题
+ls /usr/lib/x86_64-linux-gnu/libavdevice.so.58   # missing means this is the problem
 dpkg -l ffmpeg
 ```
 
-修复：
+Fix:
 
 ```bash
 sudo apt-get update && sudo apt-get install -y ffmpeg
@@ -562,26 +553,25 @@ sudo -u robot-train /opt/robot-platform/train-venv/bin/python -c \
   'from torchcodec.decoders import VideoDecoder; print("decoder OK")'
 ```
 
-`25-install-training-environment.sh` 已把 `ffmpeg` 加入安装包并在末尾做这项导入检查，
-`90-validate-deployment.sh` 也增加了 `video decoder loads FFmpeg` 一项；早于该改动装好的节点需手工补装。
+`25-install-training-environment.sh` now includes `ffmpeg` in its package list and performs this import check at the end, and `90-validate-deployment.sh` has gained a `video decoder loads FFmpeg` item; nodes installed before that change need it added by hand.
 
-## 13. 日志位置
+## 13. Log locations
 
 ```bash
 # leLab
 journalctl -u lelab-platform -n 200 --no-pager
 
-# Slurm Controller
+# Slurm controller
 journalctl -u slurmctld -n 200 --no-pager
 
-# Worker 与认证
+# workers and authentication
 journalctl -u slurmd -u munge -n 200 --no-pager
 
-# 管理基础设施
+# management infrastructure
 sudo docker compose \
   --env-file deploy/management/.env \
   -f deploy/management/compose.yaml \
   ps
 ```
 
-排障时优先保存命令输出、时间点、节点名和 Job ID，不要发送密钥、数据库密码或 Token。
+When troubleshooting, keep the command output, timestamps, node names and job IDs; never send keys, database passwords or tokens.

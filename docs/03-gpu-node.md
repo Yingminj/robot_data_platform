@@ -1,22 +1,24 @@
-# GPU Worker 安装
+# GPU worker installation
 
-GPU Worker 运行 NVIDIA Driver、Docker/NVIDIA Runtime、Munge、`slurmd` 和统一 LeRobot 训练环境。本文以 `gpu01` 为例，**每台 GPU Worker 的步骤完全相同**，只需替换主机名、IP 和 SSH 账号。命令除特别说明外，都在该 Worker 的仓库根目录执行。
+**English** | [简体中文](03-gpu-node.zh-CN.md)
 
-当前各 Worker：
+A GPU worker runs the NVIDIA driver, Docker with the NVIDIA runtime, Munge, `slurmd` and the shared LeRobot training environment. This document uses `gpu01` as the example; **the steps are identical on every GPU worker** — only the hostname, IP and SSH account change. Unless stated otherwise, commands are run from the repository root on that worker.
 
-| Slurm NodeName | IP | 管理员 SSH 目标 |
+The current workers:
+
+| Slurm NodeName | IP | Administrator SSH target |
 |---|---|---|
 | `gpu01` | `192.168.100.215` | `snorlax@192.168.100.215` |
 | `gpu02` | `192.168.100.216` | `yang@192.168.100.216` |
 | `gpu03` | `192.168.100.217` | `snorlax@192.168.100.217` |
 
-Slurm 作业统一以 `robot-train` 运行。
+Slurm jobs always run as `robot-train`.
 
-**SSH 账号只用于登录和 leLab 的只读 GPU 探测，Slurm 的节点名与它无关。** 上表中 `gpu02` 的账号是 `yang`，与另两台不同，这是允许的——账号不必与 NodeName 相同，各节点之间也不必相同。`hostname -s` 必须等于 Slurm NodeName。
+**The SSH account is only used for logging in and for leLab's read-only GPU probing; the Slurm node name has nothing to do with it.** In the table above, `gpu02` uses the account `yang`, unlike the other two — that is allowed. The account does not have to match the NodeName, and it does not have to be the same across nodes. `hostname -s` must equal the Slurm NodeName.
 
-向已经运行的集群加节点时，除本文外还有一批集群级改动，见[向已有集群增加 GPU 节点](09-add-gpu-node.md)。
+When adding a node to an already running cluster, there is a set of cluster-level changes beyond this document — see [Adding a GPU node to an existing cluster](09-add-gpu-node.md).
 
-## 1. 安装前检查
+## 1. Pre-installation checks
 
 ```bash
 hostname -s
@@ -25,13 +27,13 @@ cp config/site.env.example config/site.env
 editor config/site.env
 ```
 
-如果主机名还不是 `gpu01`：
+If the hostname is not `gpu01` yet:
 
 ```bash
 sudo hostnamectl set-hostname gpu01
 ```
 
-重新登录后执行：
+After logging in again, run:
 
 ```bash
 sudo ./scripts/05-configure-hosts.sh --apply
@@ -41,13 +43,13 @@ timedatectl show --property=NTPSynchronized --value
 getent hosts mgmt01 gpu01
 ```
 
-## 2. 准备 Python 3.12
+## 2. Prepare Python 3.12
 
 ```bash
 python3.12 --version
 ```
 
-Ubuntu 22.04 当前环境的安装方式：
+How it is installed in the current Ubuntu 22.04 environment:
 
 ```bash
 sudo apt update
@@ -57,26 +59,26 @@ sudo apt update
 sudo apt install python3.12 python3.12-dev python3.12-venv
 ```
 
-Worker 不需要 Node.js 或 npm。
+Workers do not need Node.js or npm.
 
-## 3. 安装 Worker 基础组件
+## 3. Install the worker base components
 
 ```bash
 sudo ./scripts/20-install-gpu-node.sh --apply
 ```
 
-脚本会安装或准备：
+The script installs or prepares:
 
-- NFS、Chrony、Munge、SSH；
-- Docker 和 NVIDIA Container Toolkit；
-- `robotdata` 与 `robot-train`；
-- `/cache/datasets`、`/cache/exports`、`/work/runs`；
-- `/var/lib/robot-platform/slurmd`；
-- QNAP 的持久读写挂载。
+- NFS, Chrony, Munge, SSH;
+- Docker and the NVIDIA Container Toolkit;
+- `robotdata` and `robot-train`;
+- `/cache/datasets`, `/cache/exports`, `/work/runs`;
+- `/var/lib/robot-platform/slurmd`;
+- the persistent read/write mount of the QNAP.
 
-首次执行时不会使用未知 Munge 密钥启动 `slurmd`。这是正常的，集群配置在后面安装。
+On the first run it will not start `slurmd` with an unknown Munge key. That is expected — the cluster configuration is installed later.
 
-检查本地目录和 NFS：
+Check the local directories and NFS:
 
 ```bash
 sudo -u robot-train test -d /cache/datasets
@@ -88,7 +90,7 @@ sudo -u robot-train test -w /mnt/robot_platform/jobs
 findmnt /mnt/robot_platform
 ```
 
-如果这些本地目录因早期安装中断而缺失，可补建：
+If any of these local directories are missing because an earlier installation was interrupted, create them:
 
 ```bash
 sudo install -d -o robot-train -g robotdata -m 0750 \
@@ -99,11 +101,11 @@ sudo install -d -o robot-train -g robotdata -m 0750 \
   /var/lib/robot-platform/cache
 ```
 
-`/var/lib/robot-platform/cache` 对应 leLab 的 `LELAB_JOB_CACHE_ROOT`，**必须在每台 Worker 上存在且 `robot-train` 可写**。Slurm 会把 `HOME` 指向 `robot-train` 的家目录，而它在 Worker 上并不存在，缓存到 `~` 的作业会在该节点失败。各节点用相同的本地路径即可，不需要共享存储。
+`/var/lib/robot-platform/cache` is leLab's `LELAB_JOB_CACHE_ROOT` and **must exist on every worker and be writable by `robot-train`**. Slurm points `HOME` at the `robot-train` home directory, which does not exist on the workers, so a job that caches into `~` fails on that node. The same local path on each node is enough; shared storage is not needed.
 
-NFS 挂载失败时先确认 QNAP 的白名单包含**这台**新节点的 IP，加节点时最容易漏掉这一项。
+When the NFS mount fails, first confirm the QNAP allow list contains the IP of **this** new node — that is the item most often missed when adding a node.
 
-## 4. 安装统一训练环境
+## 4. Install the shared training environment
 
 ```bash
 sudo ./scripts/25-install-training-environment.sh --apply
@@ -111,11 +113,11 @@ sudo -u robot-train /opt/robot-platform/train-venv/bin/python -c \
   'import torch, lerobot; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0))'
 ```
 
-期望 CUDA 为 `True`。不要在作业启动时临时安装 Python 包；所有 Worker 应使用同一路径和同一版本。
+CUDA is expected to be `True`. Do not install Python packages ad hoc at job start time; all workers should use the same path and the same versions.
 
-## 5. 安装 Slurm 26.05.2
+## 5. Install Slurm 26.05.2
 
-全集群必须安装完全相同的 Slurm 主版本和包构建。按 [Slurm 26.05.2 DEB 安装说明](Slurm-INSTALL.md)执行后检查：
+The whole cluster must have exactly the same Slurm major version and package build. Follow [the Slurm 26.05.2 DEB installation notes](Slurm-INSTALL.md), then check:
 
 ```bash
 slurmd -V
@@ -124,14 +126,14 @@ test -e /usr/lib/x86_64-linux-gnu/slurm-wlm/cgroup_v2.so \
   || test -e /usr/lib/x86_64-linux-gnu/slurm/cgroup_v2.so
 ```
 
-期望：
+Expected:
 
 ```text
 slurm 26.05.2
 cgroup2fs
 ```
 
-此时 `sbatch --version` 会报错，**这是正常的，不要据此判断安装失败**：
+At this point `sbatch --version` reports an error. **That is normal and is not evidence of a failed installation**:
 
 ```text
 sbatch: error: resolve_ctls_from_dns_srv: res_nsearch error: Unknown host
@@ -139,27 +141,27 @@ sbatch: error: fetch_config: DNS SRV lookup failed
 sbatch: fatal: Could not establish a configuration source
 ```
 
-新版 Slurm 在打印版本前会先尝试加载配置。本机此时还没有 `/etc/slurm/slurm.conf`，于是回退到本集群不使用的 configless DNS SRV 发现。第 7 步装入配置后该报错消失。查版本用 `/usr/sbin/slurmd -V`，不受影响。
+Newer Slurm tries to load a configuration before printing the version. This machine has no `/etc/slurm/slurm.conf` yet, so it falls back to configless DNS SRV discovery, which this cluster does not use. The error disappears once the configuration is installed in step 7. Use `/usr/sbin/slurmd -V` to check the version — it is unaffected.
 
-## 6. 收集真实硬件参数
+## 6. Collect the real hardware parameters
 
-在 `gpu01`：
+On `gpu01`:
 
 ```bash
 sudo slurmd -C
 ```
 
-把输出中的 `CPUs`、`Boards`、`SocketsPerBoard`、`CoresPerSocket`、`ThreadsPerCore` 和 `RealMemory` 填到管理机的 `config/slurm/nodes.conf`。不要照抄示例。
+Copy `CPUs`, `Boards`, `SocketsPerBoard`, `CoresPerSocket`, `ThreadsPerCore` and `RealMemory` from the output into `config/slurm/nodes.conf` on the management node. Do not copy the example values.
 
-`RealMemory` 应略低于物理内存，给操作系统和后台服务留余量。
+`RealMemory` should be slightly below the physical memory, leaving headroom for the OS and background services.
 
-## 7. 接收并安装集群配置
+## 7. Receive and install the cluster configuration
 
-先在 `mgmt01` 完成配置渲染。以下是一套明确的安全传输示例。
+Render the configuration on `mgmt01` first. Below is one concrete secure-transfer example.
 
-### 7.1 在 mgmt01 暂存并复制
+### 7.1 Stage and copy on mgmt01
 
-> **整段一次执行完，不要只粘贴后半段。** 下面每处 `${stage_dir:?}` 的 `:?` 都不能省略：如果漏掉第一行 `stage_dir="$(mktemp -d)"`，变量为空，`"$stage_dir/munge.key"` 会变成 `/munge.key`，而带 `sudo` 的那条会**静默成功**，把集群唯一的认证密钥写到文件系统根目录。加上 `:?` 后 bash 会立即报 `stage_dir: parameter null or not set` 并终止。
+> **Run the whole block at once; do not paste only the second half.** The `:?` in each `${stage_dir:?}` must not be dropped: if the first line `stage_dir="$(mktemp -d)"` is missed, the variable is empty, `"$stage_dir/munge.key"` becomes `/munge.key`, and the `sudo` line **silently succeeds**, writing the cluster's unique authentication key into the filesystem root. With `:?`, bash immediately reports `stage_dir: parameter null or not set` and aborts.
 
 ```bash
 stage_dir="$(mktemp -d)"
@@ -182,15 +184,15 @@ rm -f "${stage_dir:?}/slurm.conf.generated"
 rmdir "${stage_dir:?}"
 ```
 
-如果已经误写到根目录，检查并销毁：
+If it was already written to the root directory by mistake, check and destroy it:
 
 ```bash
 ls -l /munge.key && sudo shred -u /munge.key
 ```
 
-### 7.2 在 gpu01 安装
+### 7.2 Install on gpu01
 
-从 `gpu01` 仓库根目录执行：
+From the repository root on `gpu01`:
 
 ```bash
 sudo ./scripts/cluster/install-worker-config.sh \
@@ -199,9 +201,9 @@ sudo ./scripts/cluster/install-worker-config.sh \
   --apply
 ```
 
-这里的两个文件路径必须在**执行命令的这台机器**上真实存在。`/secure/temp/...` 只是旧文档中的占位写法，不是预设目录。脚本只输出 usage 时，说明这两个文件之一不可读，或第三个参数不是 `--apply`。
+Both file paths must really exist on **the machine running the command**. `/secure/temp/...` is only a placeholder from older documentation, not a preset directory. If the script only prints usage, then one of the two files is unreadable, or the third argument is not `--apply`.
 
-验证后销毁 Worker 上的临时密钥：
+After verifying, destroy the temporary key on the worker:
 
 ```bash
 shred -u /home/snorlax/robot-platform-secure/munge.key
@@ -209,7 +211,7 @@ rm -f /home/snorlax/robot-platform-secure/slurm.conf.generated
 rmdir /home/snorlax/robot-platform-secure
 ```
 
-检查：
+Check:
 
 ```bash
 systemctl is-active munge slurmd
@@ -218,9 +220,9 @@ sha256sum /etc/slurm/slurm.conf /etc/slurm/cgroup.conf /etc/slurm/gres.conf
 journalctl -u slurmd -n 50 --no-pager
 ```
 
-三个 checksum 必须与 `mgmt01` 上的完全一致，这是判断配置是否真的装对的唯一可靠方式。
+The three checksums must match those on `mgmt01` exactly. That is the only reliable way to tell whether the configuration was really installed correctly.
 
-`slurmd -G` 会输出一条 GRES 类型提示，**这是正常的**：
+`slurmd -G` prints a GRES type notice, **which is normal**:
 
 ```text
 gres/gpu: _normalize_sys_gres_types: Could not find an unused configuration record
@@ -228,15 +230,15 @@ with a GRES type that is a substring of system device `nvidia_geforce_rtx_4090`.
 Setting system GRES type to NULL
 ```
 
-`gres.conf` 声明的是不带型号的 `Name=gpu`，NVML 报告的设备型号是 `nvidia_geforce_rtx_4090`，于是 Slurm 把类型置为 NULL，与 `nodes.conf` 中同样不带型号的 `Gres=gpu:1` 一致。紧随其后的这行才是结论：
+`gres.conf` declares `Name=gpu` with no model, NVML reports the device model as `nvidia_geforce_rtx_4090`, so Slurm sets the type to NULL — consistent with the equally model-free `Gres=gpu:1` in `nodes.conf`. The line right after it is the actual conclusion:
 
 ```text
 Gres Name=gpu Type=(null) Count=1 Index=0 File=/dev/nvidia0 Flags=HAS_FILE,ENV_NVML
 ```
 
-## 8. 从管理机做调度测试
+## 8. Run a scheduling test from the management node
 
-不要把直接 SSH 运行 Python 当作 Slurm 验收。回到 `mgmt01` 执行：
+Do not treat running Python over a direct SSH session as Slurm acceptance. Go back to `mgmt01` and run:
 
 ```bash
 srun \
@@ -252,14 +254,14 @@ srun \
   'import os, socket, torch; print(socket.gethostname()); print(os.environ.get("CUDA_VISIBLE_DEVICES")); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0))'
 ```
 
-## 9. Worker 运行约定
+## 9. Worker operating conventions
 
-- 正式训练通过 Slurm，不通过个人 SSH 会话启动；
-- `/mnt/robot_platform/jobs` 保存日志和 checkpoint，是共享持久数据；
-- `/cache` 和 `/work` 是本地空间，可重建，不保存唯一副本；
-- 手动 CUDA 进程会让 leLab 把该节点标记为不可调度（`eligible: false`）；
-- CPU 日常进程不影响 leLab 的 GPU 空闲判断；
-- 不开放 Docker TCP API；
-- Worker 不运行 `slurmctld`、PostgreSQL、Redis、MLflow 或 leLab。
+- production training goes through Slurm, not through a personal SSH session;
+- `/mnt/robot_platform/jobs` holds logs and checkpoints and is shared persistent data;
+- `/cache` and `/work` are local, rebuildable space and must not hold the only copy of anything;
+- a manual CUDA process makes leLab mark that node as unschedulable (`eligible: false`);
+- ordinary CPU processes do not affect leLab's GPU-idle judgement;
+- the Docker TCP API is not exposed;
+- workers do not run `slurmctld`, PostgreSQL, Redis, MLflow or leLab.
 
-远程桌面类工具（RustDesk、TeamViewer、向日葵等）会占用 GPU 并被计为 compute process，使该节点长期 `eligible: false`。leLab 已内置一份图形进程名白名单（见 `apps/lelab/lelab/cluster.py` 的 `graphics_patterns`），本机在用的工具若不在其中，把进程名补进去，不要靠关闭工具绕开。
+Remote desktop tools (RustDesk, TeamViewer, Sunlogin and similar) occupy the GPU and are counted as compute processes, which keeps the node at `eligible: false` indefinitely. leLab ships an allow list of graphics process names (see `graphics_patterns` in `apps/lelab/lelab/cluster.py`); if the tool in use on this machine is not in it, add the process name rather than working around it by closing the tool.

@@ -1,86 +1,92 @@
-# 机器人数据平台部署包
+# Robot Data Platform Deployment Package
 
-本仓库用于部署一套小型机器人训练平台：QNAP 提供共享数据，`mgmt01` 同时承担管理面和一张 GPU，其余节点提供更多 GPU，Slurm 负责调度，leLab 提供训练 Web。
+**English** | [简体中文](README.zh-CN.md)
 
-当前站点拓扑以 `config/site.env.example` 为准：
+This repository deploys a small robot training platform: a QNAP NAS provides shared data, `mgmt01` acts as both the management plane and one GPU worker, the remaining nodes contribute more GPUs, Slurm handles scheduling, and leLab provides the training web UI.
 
-| 主机 | 角色 | 地址 | SSH 登录账号 | 需要安装 |
+Once deployed, leLab presents all four GPUs as a single compute target. A training job can either let Slurm pick a free GPU automatically or be pinned to a specific node:
+
+<img src="apps/assets/1.png" alt="leLab compute target selection: mgmt01, gpu01, gpu02, gpu03, four RTX 4090s" width="600">
+
+The authoritative site topology is `config/site.env.example`:
+
+| Host | Role | Address | SSH login | Install steps |
 |---|---|---|---|---|
-| `mgmt01` | 管理机、Slurm Controller、GPU Worker、leLab | `192.168.100.202` | 本机，不 SSH | `10`、`25`、Controller 配置、`15` |
-| `gpu01` | GPU Worker | `192.168.100.215` | `snorlax` | `20`、`25`、Worker 配置 |
-| `gpu02` | GPU Worker | `192.168.100.216` | `yang` | `20`、`25`、Worker 配置 |
-| `gpu03` | GPU Worker | `192.168.100.217` | `snorlax` | `20`、`25`、Worker 配置 |
-| QNAP | NFS 存储 | `192.168.100.184:/robot_platform` | — | 仅配置共享与权限 |
+| `mgmt01` | Management node, Slurm controller, GPU worker, leLab | `192.168.100.202` | local, no SSH | `10`, `25`, controller config, `15` |
+| `gpu01` | GPU worker | `192.168.100.215` | `snorlax` | `20`, `25`, worker config |
+| `gpu02` | GPU worker | `192.168.100.216` | `yang` | `20`, `25`, worker config |
+| `gpu03` | GPU worker | `192.168.100.217` | `snorlax` | `20`, `25`, worker config |
+| QNAP | NFS storage | `192.168.100.184:/robot_platform` | — | share and permissions only |
 
-**Slurm NodeName 和 SSH 登录账号是两个不同的东西，不能互相替代。** 节点的 Slurm 名称是 `gpu01`/`gpu02`/`gpu03`；SSH 目标是 `snorlax@192.168.100.215`、`yang@192.168.100.216`、`snorlax@192.168.100.217`。SSH 账号不必与 NodeName 相同，各节点之间也不必相同（上表中 `gpu02` 就与其他两台不同）。
+**A Slurm NodeName and an SSH login account are two different things and cannot substitute for each other.** The Slurm names are `gpu01`/`gpu02`/`gpu03`; the SSH targets are `snorlax@192.168.100.215`, `yang@192.168.100.216`, and `snorlax@192.168.100.217`. The SSH account does not have to match the NodeName, and it does not have to be the same across nodes (`gpu02` above differs from the other two).
 
-已经在运行的集群要再加节点，不要重走首次部署流程，看 [向已有集群增加 GPU 节点](docs/09-add-gpu-node.md)。
+To add a node to an already running cluster, do not repeat the first-time deployment flow — see [Adding a GPU node to an existing cluster](docs/09-add-gpu-node.md).
 
-## 从这里开始
+## Start here
 
-首次部署请严格按下面顺序执行。不要根据脚本编号猜执行顺序：`15-install-lelab-platform.sh` 虽然编号较小，但必须在所有机器的 Slurm 和训练环境都完成后执行。
+For a first deployment, follow the order below exactly. Do not infer the execution order from the script numbers: `15-install-lelab-platform.sh` has a low number but must run after Slurm and the training environment are complete on every machine.
 
 ```text
-0. 所有主机核对 site.env、主机名、驱动、网络和时间
-1. QNAP 建共享目录并授权全部节点 IP
-2. 所有主机安装 /etc/hosts 托管块
-3. mgmt01 安装管理机基础组件、MLflow 和训练环境
-4. 每台 GPU Worker 安装 Worker 基础组件和训练环境
-5. 所有主机统一安装支持 cgroup v2 的 Slurm 26.05.2
-6. mgmt01 渲染 Slurm 配置；分别安装 Controller/Worker 配置
-7. 逐节点完成 GPU smoke test
-8. mgmt01 安装 leLab，配置到每台 Worker 的 SSH 探测
-9. 检查 API，放入一份小数据集，提交第一条短训练任务
+0. On every host, verify site.env, hostname, driver, network and time
+1. On QNAP, create the shared directories and authorize every node IP
+2. On every host, install the managed /etc/hosts block
+3. On mgmt01, install the management components, MLflow and the training environment
+4. On every GPU worker, install the worker components and the training environment
+5. On every host, install the same cgroup v2-capable Slurm 26.05.2
+6. On mgmt01, render the Slurm config; install the controller/worker configs separately
+7. Run the GPU smoke test on each node
+8. On mgmt01, install leLab and configure SSH probing to every worker
+9. Check the API, add a small dataset, submit the first short training job
 ```
 
-下面几处顺序不能调换，否则失败现象不指向真正原因：
+The following orderings cannot be swapped — if they are, the failure symptom will not point at the real cause:
 
-- 第 5 步必须在第 3、4 步之后。角色脚本会先装上 Ubuntu 自带的旧 Slurm，最终版本以 26.05.2 为准。
-- 第 6 步必须在第 5 步之后，且要等**所有**节点都装完 Slurm、都跑过 `slurmd -C`，因为渲染需要每台的真实硬件参数。
-- 第 8 步必须在第 7 步之后。leLab 安装脚本会检查 `sbatch`/`sinfo` 可用。
+- Step 5 must come after steps 3 and 4. The role scripts first install the old Slurm shipped with Ubuntu; 26.05.2 is the version that must win in the end.
+- Step 6 must come after step 5, and must wait until **every** node has Slurm installed and has run `slurmd -C`, because rendering needs each machine's real hardware parameters.
+- Step 8 must come after step 7. The leLab installer checks that `sbatch`/`sinfo` work.
 
-对应文档：
+Corresponding documents:
 
-| 阶段 | 文档 |
+| Stage | Document |
 |---|---|
-| QNAP | [QNAP NAS 配置](docs/01-qnap-nas.md) |
-| 管理机 | [管理机安装](docs/02-management-node.md) |
-| GPU Worker | [GPU 节点安装](docs/03-gpu-node.md) |
-| Slurm 26.05.2 DEB | [Slurm 26.05.2 安装](docs/Slurm-INSTALL.md) |
-| Slurm 配置和验收 | [Slurm 集群收尾](docs/06-cluster-finalization.md) |
-| leLab | [leLab 集群 Web](docs/07-lelab-cluster-web.md) |
-| **扩容：加 GPU 节点** | [向已有集群增加 GPU 节点](docs/09-add-gpu-node.md) |
-| 常见错误 | [安装与运行排障](docs/08-troubleshooting.md) |
-| 可选采集节点 | [采集节点](docs/04-collector-node.md)、[采集与 GPU 合并节点](docs/05-combined-node.md) |
+| QNAP | [QNAP NAS setup](docs/01-qnap-nas.md) |
+| Management node | [Management node installation](docs/02-management-node.md) |
+| GPU worker | [GPU node installation](docs/03-gpu-node.md) |
+| Slurm 26.05.2 DEB | [Slurm 26.05.2 installation](docs/Slurm-INSTALL.md) |
+| Slurm config and acceptance | [Slurm cluster finalization](docs/06-cluster-finalization.md) |
+| leLab | [leLab cluster web](docs/07-lelab-cluster-web.md) |
+| **Scale out: add a GPU node** | [Adding a GPU node to an existing cluster](docs/09-add-gpu-node.md) |
+| Common errors | [Installation and runtime troubleshooting](docs/08-troubleshooting.md) |
+| Optional collector nodes | [Collector node](docs/04-collector-node.md), [Combined collector and GPU node](docs/05-combined-node.md) |
 
-## 部署前约定
+## Prerequisites
 
-每台 Linux 主机都应满足：
+Every Linux host must satisfy the following:
 
-- 当前已验证环境为 Ubuntu 22.04，使用静态 IP并禁止自动休眠；
-- 仓库已复制到本机，并从仓库根目录执行命令；
-- NVIDIA 驱动已经安装，`nvidia-smi` 正常；
-- 能访问 QNAP TCP 2049、管理机 TCP 6817，管理机能访问 Worker TCP 6818；
-- 系统时间已同步；
-- `robot-train` 的 UID 和 `robotdata` 的 GID 在**所有**节点上是同一个数字；
-- 使用 Slurm 26.05.2，且 `stat -fc %T /sys/fs/cgroup` 输出 `cgroup2fs`。
+- the currently validated environment is Ubuntu 22.04, with a static IP and automatic suspend disabled;
+- the repository has been copied to the machine, and commands are run from the repository root;
+- the NVIDIA driver is installed and `nvidia-smi` works;
+- the host can reach QNAP TCP 2049 and the management node on TCP 6817, and the management node can reach workers on TCP 6818;
+- system time is synchronized;
+- the UID of `robot-train` and the GID of `robotdata` are the same number on **all** nodes;
+- Slurm 26.05.2 is used, and `stat -fc %T /sys/fs/cgroup` prints `cgroup2fs`.
 
-UID/GID 用 `id robot-train` 和 `getent group robotdata` 在每台核对。数字不一致时，作业能调度成功但写 NAS 时权限错误，现象与 NFS 配置问题相同，很难定位。
+Verify the UID/GID on each machine with `id robot-train` and `getent group robotdata`. When the numbers differ, jobs still schedule successfully but fail with permission errors when writing to the NAS — a symptom identical to an NFS misconfiguration and very hard to trace.
 
-脚本不会安装或升级 NVIDIA 驱动，也不会格式化磁盘。
+The scripts never install or upgrade the NVIDIA driver, and never format a disk.
 
-角色脚本允许 Ubuntu 24.04，但仓库内 Slurm DEB 是为 Ubuntu 22.04 Jammy 构建的，不能直接假定可用于 24.04。24.04 应单独准备与系统 ABI 匹配的同版本包。
+The role scripts allow Ubuntu 24.04, but the Slurm DEBs in this repository are built for Ubuntu 22.04 Jammy and cannot be assumed to work on 24.04. For 24.04, build packages of the same version against the system ABI separately.
 
-## 0. 准备统一配置
+## 0. Prepare the shared configuration
 
-在每台主机分别执行：
+Run on each host:
 
 ```bash
 cp config/site.env.example config/site.env
 editor config/site.env
 ```
 
-所有主机的以下字段必须完全一致：
+The following fields must be byte-for-byte identical on all hosts:
 
 ```text
 MANAGEMENT_HOST
@@ -98,41 +104,41 @@ TRAIN_ENV_ROOT
 LEROBOT_GIT_REF
 ```
 
-当前四节点值应为：
+For the current four-node site, the values are:
 
 ```bash
 GPU_NODE_NAMES="mgmt01 gpu01 gpu02 gpu03"
 GPU_NODE_IPS="192.168.100.202 192.168.100.215 192.168.100.216 192.168.100.217"
 ```
 
-两个列表按位置一一对应，长度必须相同，否则 `05-configure-hosts.sh` 会报 `GPU_NODE_NAMES and GPU_NODE_IPS have different lengths`。
+The two lists correspond positionally and must have the same length; otherwise `05-configure-hosts.sh` reports `GPU_NODE_NAMES and GPU_NODE_IPS have different lengths`.
 
-不要提交 `config/site.env`。它是本地活动配置，已被 Git 忽略。**这也意味着换机器或重装后它不会自动恢复**，拓扑变更请同时更新 `config/site.env.example`。
+Do not commit `config/site.env`. It is the local active configuration and is Git-ignored. **That also means it will not come back on its own after a machine swap or a reinstall** — when the topology changes, update `config/site.env.example` as well.
 
-在每台主机上设置对应主机名，然后重新登录。主机名必须与将要写入 `nodes.conf` 的 Slurm NodeName 完全一致：
+Set the matching hostname on each host, then log in again. The hostname must exactly match the Slurm NodeName that will be written into `nodes.conf`:
 
 ```bash
-sudo hostnamectl set-hostname mgmt01   # 只在 mgmt01
-sudo hostnamectl set-hostname gpu01    # 只在 gpu01，其余节点类推
+sudo hostnamectl set-hostname mgmt01   # mgmt01 only
+sudo hostnamectl set-hostname gpu01    # gpu01 only; likewise for the other nodes
 ```
 
-所有主机都执行：
+Run on every host:
 
 ```bash
 sudo ./scripts/05-configure-hosts.sh --apply
 getent hosts mgmt01 gpu01 gpu02 gpu03
 ```
 
-`05` 只管理 `/etc/hosts` 中带 `robot-platform` 标记的块。它有两种停止情况：
+`05` only manages the block in `/etc/hosts` carrying the `robot-platform` marker. It stops in two cases:
 
-- 块外已存在同名条目 → 停止，要求人工处理；
-- 托管块已存在但与目标不一致（例如后来加了节点）→ 停止并提示 `existing managed /etc/hosts block differs`。
+- an entry with the same name already exists outside the block → it stops and asks for manual handling;
+- the managed block exists but differs from the target (for example a node was added later) → it stops with `existing managed /etc/hosts block differs`.
 
-**该脚本不做增量修改。** 拓扑变更时要先删除旧块再重新生成，步骤见[向已有集群增加 GPU 节点](docs/09-add-gpu-node.md#3-重建-etchosts-托管块)。
+**The script does not make incremental edits.** When the topology changes, delete the old block first and regenerate it — see [Adding a GPU node to an existing cluster](docs/09-add-gpu-node.md#3-rebuild-the-managed-etchosts-block).
 
-## 1. 准备 QNAP
+## 1. Prepare the QNAP
 
-先完成 [QNAP NAS 配置](docs/01-qnap-nas.md)。至少应存在：
+Complete [QNAP NAS setup](docs/01-qnap-nas.md) first. At minimum these must exist:
 
 ```text
 /mnt/robot_platform/datasets
@@ -140,11 +146,11 @@ getent hosts mgmt01 gpu01 gpu02 gpu03
 /mnt/robot_platform/mlflow-artifacts
 ```
 
-QNAP 的 NFS 白名单必须包含**全部**节点 IP：`192.168.100.202`、`192.168.100.215`、`192.168.100.216`、`192.168.100.217`。加节点时容易漏掉这一步，现象是新节点挂载失败或只读。当前试点使用 `all_squash` 时，应给 QNAP guest 账号共享目录读写权限。
+The QNAP NFS allow list must contain **every** node IP: `192.168.100.202`, `192.168.100.215`, `192.168.100.216`, `192.168.100.217`. This step is easy to forget when adding a node; the symptom is that the new node fails to mount or mounts read-only. While the pilot uses `all_squash`, give the QNAP guest account read/write permission on the shared directory.
 
-## 2. 安装 mgmt01
+## 2. Install mgmt01
 
-以下命令只在 `mgmt01` 执行：
+Run the following on `mgmt01` only:
 
 ```bash
 ./scripts/00-audit-host.sh management
@@ -153,13 +159,13 @@ sudo ./deploy/management/bootstrap.sh --apply
 sudo ./scripts/25-install-training-environment.sh --apply
 ```
 
-Ubuntu 22.04 默认 Python 3.10，而当前 LeRobot 需要 Python 3.12。若本机还没有 `python3.12`，先按 [管理机安装](docs/02-management-node.md)中的说明安装。
+Ubuntu 22.04 ships Python 3.10, while the current LeRobot needs Python 3.12. If the machine has no `python3.12` yet, install it first following [Management node installation](docs/02-management-node.md).
 
-`10` 会生成集群唯一的 `/etc/munge/munge.key`。不要重新生成第二份，也不要放进 Git、NAS 或聊天记录。
+`10` generates the cluster-unique `/etc/munge/munge.key`. Do not generate a second one, and do not put it in Git, on the NAS, or in a chat log.
 
-## 3. 安装每台 GPU Worker
+## 3. Install every GPU worker
 
-以下命令在 `gpu01`、`gpu02`、`gpu03` 上分别执行：
+Run the following on `gpu01`, `gpu02` and `gpu03` separately:
 
 ```bash
 ./scripts/00-audit-host.sh gpu
@@ -167,7 +173,7 @@ sudo ./scripts/20-install-gpu-node.sh --apply
 sudo ./scripts/25-install-training-environment.sh --apply
 ```
 
-确认本地目录存在：
+Confirm the local directories exist:
 
 ```bash
 sudo -u robot-train test -d /cache/datasets
@@ -176,69 +182,69 @@ sudo -u robot-train test -d /work/runs
 sudo -u robot-train test -w /var/lib/robot-platform/cache
 ```
 
-最后一项是 `LELAB_JOB_CACHE_ROOT`，**必须在每台 Worker 上存在且 `robot-train` 可写**。Slurm 会把 `HOME` 指向 `robot-train` 的家目录，而它在 Worker 上并不存在，缓存到 `~` 的作业会在该节点失败。缺失时补建：
+The last one is `LELAB_JOB_CACHE_ROOT`, which **must exist on every worker and be writable by `robot-train`**. Slurm points `HOME` at the `robot-train` home directory, which does not exist on the workers, so a job that caches into `~` fails on that node. Create it if missing:
 
 ```bash
 sudo install -d -o robot-train -g robotdata -m 0750 /var/lib/robot-platform/cache
 ```
 
-## 4. 安装并配置 Slurm
+## 4. Install and configure Slurm
 
-Ubuntu 22.04 仓库自带的旧 Slurm 不适合作为本项目最终版本。基础角色脚本执行完成后，在所有主机安装相同的 Slurm 26.05.2 DEB，步骤见 [Slurm 26.05.2 安装](docs/Slurm-INSTALL.md)。
+The old Slurm in the Ubuntu 22.04 repositories is not suitable as the final version for this project. After the base role scripts finish, install the same Slurm 26.05.2 DEBs on every host — see [Slurm 26.05.2 installation](docs/Slurm-INSTALL.md).
 
-然后按 [Slurm 集群收尾](docs/06-cluster-finalization.md)完成：
+Then complete [Slurm cluster finalization](docs/06-cluster-finalization.md):
 
-1. 所有主机收集真实 `sudo slurmd -C`；
-2. `mgmt01` 填写 `config/slurm/nodes.conf`，每台一行；
-3. 渲染并审查 `config/slurm/slurm.conf.generated`；
-4. `mgmt01` 安装 Controller 配置；
-5. 安全复制 Munge 密钥和生成配置到每台 Worker；
-6. 每台 Worker 使用本机真实路径安装 Worker 配置；
-7. 验证全部节点都为 `idle`，并逐节点运行一张 GPU 的 smoke test。
+1. collect the real `sudo slurmd -C` output on every host;
+2. on `mgmt01`, fill in `config/slurm/nodes.conf`, one line per machine;
+3. render and review `config/slurm/slurm.conf.generated`;
+4. install the controller config on `mgmt01`;
+5. securely copy the Munge key and the generated config to every worker;
+6. install the worker config on each worker using that machine's real paths;
+7. verify that every node is `idle` and run a single-GPU smoke test on each node.
 
-两个反复出错的细节：
+Two details that go wrong repeatedly:
 
-- **`/etc/slurm/slurm.conf` 必须全集群逐字节一致。** 拓扑变化时，已有节点手里的旧配置也要一起换掉，只更新新节点会让已有节点失效。
-- `/secure/temp/munge.key` 之类的路径只是文档占位符，不会自动创建。传给 `install-worker-config.sh` 的前两个参数必须是 **该 Worker 本机已经存在且 root 可读的文件**。
+- **`/etc/slurm/slurm.conf` must be byte-for-byte identical across the whole cluster.** When the topology changes, the stale config on existing nodes has to be replaced too; updating only the new node breaks the existing ones.
+- Paths like `/secure/temp/munge.key` are documentation placeholders and are not created for you. The first two arguments passed to `install-worker-config.sh` must be **files that already exist on that worker and are readable by root**.
 
-## 5. 安装 leLab
+## 5. Install leLab
 
-确认 `sinfo -N -l` 中全部节点均为 `idle`，并且每台机器的统一训练环境 GPU 测试都通过后，只在 `mgmt01` 执行：
+Once every node shows `idle` in `sinfo -N -l` and the shared training environment passes its GPU test on every machine, run on `mgmt01` only:
 
 ```bash
 sudo ./scripts/15-install-lelab-platform.sh --apply
 ```
 
-安装前还需要：
+The installation also requires:
 
-- `mgmt01` 上有 Python 3.12；
-- 发起 `sudo` 的普通用户有 Node.js 20.19 或更高版本及 npm；
-- NAS 的 `datasets` 可读、`jobs` 可写；
-- Slurm 命令可用。
+- Python 3.12 on `mgmt01`;
+- Node.js 20.19 or newer plus npm for the ordinary user invoking `sudo`;
+- `datasets` readable and `jobs` writable on the NAS;
+- working Slurm commands.
 
-安装脚本首次创建 `/etc/robot-platform/lelab.env`，以后重跑不会覆盖它。当前远程 SSH 用户应配置为：
+The installer creates `/etc/robot-platform/lelab.env` on first run and does not overwrite it afterwards. With the current remote SSH users it should be configured as:
 
 ```bash
 LELAB_CLUSTER_NODES=mgmt01=192.168.100.202,gpu01=snorlax@192.168.100.215,gpu02=yang@192.168.100.216,gpu03=snorlax@192.168.100.217
 ```
 
-这一行会很长。**用编辑器改，不要用 `sed` 一行命令**：终端粘贴时长命令会被折行，`sed` 收到不完整的表达式后报 `unterminated 's' command`。该文件由 systemd 以 `EnvironmentFile` 读取，改完必须 `sudo systemctl restart lelab-platform` 才生效。
+This line gets long. **Edit it in an editor, not with a one-line `sed`**: a long command wraps when pasted into a terminal, and `sed` reports `unterminated 's' command` once it receives an incomplete expression. The file is read by systemd as an `EnvironmentFile`, so after editing it you must run `sudo systemctl restart lelab-platform` for the change to take effect.
 
-SSH 密钥、host key 验证和检查命令见 [leLab 集群 Web](docs/07-lelab-cluster-web.md)。
+For SSH keys, host key verification and check commands, see [leLab cluster web](docs/07-lelab-cluster-web.md).
 
-## 6. 验收
+## 6. Acceptance
 
-角色验收：
+Per-role acceptance:
 
 ```bash
 # mgmt01
 ./scripts/90-validate-deployment.sh management
 
-# 每台 GPU Worker
+# every GPU worker
 ./scripts/90-validate-deployment.sh gpu
 ```
 
-管理机上的关键检查：
+Key checks on the management node:
 
 ```bash
 scontrol ping
@@ -250,30 +256,42 @@ curl --noproxy '*' -fsS http://127.0.0.1:8000/cluster/status | jq
 curl --noproxy '*' -fsS http://127.0.0.1:8000/cluster/templates | jq
 ```
 
-最终验收不是“服务为 active”，而是：
+Final acceptance is not "the service is active", it is:
 
-1. 每个节点都能被 Slurm 分配一张 GPU，且 `nvidia-smi -L` 返回**各不相同**的 GPU UUID（UUID 重复说明 `NodeAddr` 写错，两个 NodeName 指向了同一台物理机）；
-2. leLab 能看到全部节点和显存，且 `eligible` 为 `true`；
-3. NAS 中的小型 LeRobot 数据集能出现在页面；
-4. 能提交一条短训练任务并生成日志与 checkpoint；
-5. 中断后能从共享 checkpoint 恢复。
+1. every node can be allocated one GPU by Slurm, and `nvidia-smi -L` returns a **different** GPU UUID on each (a repeated UUID means `NodeAddr` is wrong and two NodeNames point at the same physical machine);
+2. leLab sees every node and its VRAM, with `eligible` set to `true`;
+3. a small LeRobot dataset on the NAS shows up in the UI;
+4. a short training job can be submitted and produces logs and a checkpoint;
+5. after an interruption, the job can resume from the shared checkpoint.
 
-## 脚本行为和安全边界
+## Script behavior and security boundary
 
-- `00-audit-host.sh` 和 `90-validate-deployment.sh` 是只读检查；
-- 其他安装脚本必须显式传入 `--apply`；
-- 角色安装脚本会创建账号、目录、systemd 服务和 NFS 挂载；
-- `15`、`25` 会访问 Python/Git/npm 软件源，耗时较长；
-- `config/site.env`、`deploy/management/.env`、Munge 密钥、leLab SSH 私钥和 Token 均不得提交；
-- 失败后可在修正原因后重跑相同步骤，但使用自建 Slurm DEB 后，重跑 `10`/`20` 前应先阅读 [Slurm 安装说明](docs/Slurm-INSTALL.md)中的版本保护提示。
+- `00-audit-host.sh` and `90-validate-deployment.sh` are read-only checks;
+- every other installation script requires an explicit `--apply`;
+- the role installers create accounts, directories, systemd services and the NFS mount;
+- `15` and `25` reach out to Python/Git/npm package sources and take a while;
+- `config/site.env`, `deploy/management/.env`, the Munge key, and the leLab SSH private key and tokens must never be committed;
+- after a failure you can fix the cause and re-run the same step, but once the self-built Slurm DEBs are in use, read the version-protection notes in [Slurm installation](docs/Slurm-INSTALL.md) before re-running `10`/`20`.
 
-## 当前不包含的功能
+## Not included yet
 
-仓库目前没有完整的数据治理业务：
+The repository does not yet contain a complete data governance workflow:
 
-- H5 validator 和自动 QC Worker；
-- 时间范围标注前端；
-- 可运行的 Upload Agent；
-- 正式训练数据和团队定制模型。
+- the H5 validator and the automatic QC worker;
+- the time-range annotation frontend;
+- a runnable upload agent;
+- production training data and team-specific models.
 
-采集相关的 `30`/`40` 脚本只准备账号、目录和 systemd 模板，不代表采集链路已经可以投入使用。
+The collection-related scripts `30`/`40` only prepare accounts, directories and systemd templates; they do not mean the collection pipeline is ready for use.
+
+## Acknowledgements
+
+This platform is built on the following open source projects, with thanks:
+
+- [huggingface/leLab](https://github.com/huggingface/leLab) — the web interface in `apps/lelab` comes from this project (Apache-2.0). This repository adds Slurm cluster scheduling, multi-node GPU probing and NAS-shared datasets on top of it; the original license and copyright notice are kept in `apps/lelab/LICENSE`.
+- [huggingface/lerobot](https://github.com/huggingface/lerobot) — the underlying framework for training, inference and the LeRobot v3 dataset format (Apache-2.0), which is what the conversions in `tool/` target.
+- [SchedMD/slurm](https://github.com/SchedMD/slurm) — cluster job scheduling (GPL-2.0).
+- [mlflow/mlflow](https://github.com/mlflow/mlflow) — training metrics and artifact tracking (Apache-2.0).
+- [ros2/rosbag2](https://github.com/ros2/rosbag2) — the recording format on the collection side and the input to the conversions in `tool/`.
+
+Model and dataset names visible in the screenshots are local pilot data and are not part of the projects above.

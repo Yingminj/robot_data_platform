@@ -1,10 +1,12 @@
-# Slurm 26.05.2 DEB 安装说明
+# Slurm 26.05.2 DEB installation notes
 
-本文只负责把每台 Ubuntu 22.04 `amd64` 主机统一到支持 cgroup v2 的 Slurm 26.05.2。集群节点参数、Munge 分发和启动顺序见 [Slurm 集群收尾](06-cluster-finalization.md)。
+**English** | [简体中文](Slurm-INSTALL.zh-CN.md)
 
-**全集群必须使用同一个包版本和同一份构建产物。** 版本混用时的现象是节点认证或协议不兼容，报错不指向版本。加节点时用同一份 `artifacts/` 目录，不要临时从别处获取。
+This document only covers bringing every Ubuntu 22.04 `amd64` host onto the same cgroup v2-capable Slurm 26.05.2. Cluster node parameters, Munge distribution and startup order are covered in [Slurm cluster finalization](06-cluster-finalization.md).
 
-仓库内构建产物：
+**The whole cluster must use the same package version and the same build artifacts.** When versions are mixed, the symptom is node authentication or protocol incompatibility, and the error does not point at the version. When adding a node, use the same `artifacts/` directory; do not fetch packages from somewhere else on the fly.
+
+Build artifacts in the repository:
 
 ```text
 artifacts/slurm-26.05.2-jammy-amd64/
@@ -14,51 +16,51 @@ artifacts/slurm-26.05.2-jammy-amd64/
 └── source/
 ```
 
-压缩归档及校验：
+The compressed archive and its checksum:
 
 ```text
 artifacts/slurm-26.05.2-jammy-amd64.tar.gz
 artifacts/slurm-26.05.2-jammy-amd64.tar.gz.sha256
 ```
 
-## 1. 适用范围和安装顺序
+## 1. Scope and installation order
 
-当前推荐顺序：
+The recommended order:
 
 ```text
-mgmt01 先执行 scripts/10-install-management.sh
-每台 GPU Worker 先执行 scripts/20-install-gpu-node.sh
-→ 所有主机安装本页 Slurm 26.05.2
-→ 所有主机执行 slurmd -C，收集硬件参数
-→ 渲染并安装最终 Slurm 配置
+run scripts/10-install-management.sh on mgmt01 first
+run scripts/20-install-gpu-node.sh on every GPU worker first
+→ install Slurm 26.05.2 from this page on every host
+→ run slurmd -C on every host to collect hardware parameters
+→ render and install the final Slurm configuration
 ```
 
-第 3 步必须在**所有**节点上完成后才能进入第 4 步：渲染需要每台的真实硬件参数，缺一台就无法生成完整的 `slurm.conf`。
+Step 3 must be complete on **every** node before step 4 begins: rendering needs each machine's real hardware parameters, and one missing machine makes a complete `slurm.conf` impossible.
 
-原因是角色脚本会准备账号、目录、NFS 和其他系统依赖，但 Ubuntu 22.04 自带的 Slurm 较旧。最终版本必须以本页验证结果为准。
+The reason is that the role scripts prepare accounts, directories, NFS and other system dependencies, but the Slurm shipped with Ubuntu 22.04 is old. The final version must be the one verified on this page.
 
-安装 26.05.2 后，避免再次执行会明确安装 Ubuntu `slurm-wlm` 的操作。如确需重跑 `10`/`20`，先用 `apt -s` 检查模拟事务，确认不会移除 `slurm-smd*`：
+After installing 26.05.2, avoid any operation that explicitly installs Ubuntu's `slurm-wlm`. If you really have to re-run `10`/`20`, first simulate the transaction with `apt -s` and confirm it will not remove `slurm-smd*`:
 
 ```bash
 sudo apt -s install slurm-wlm
 ```
 
-如果模拟结果要删除或替换 `slurm-smd*`，不要确认事务。
+If the simulation would delete or replace `slurm-smd*`, do not confirm the transaction.
 
-## 2. 构建信息
+## 2. Build information
 
-- 上游源码：SchedMD Slurm 26.05.2；
-- Debian 包版本：`26.05.2-1`；
-- 构建目标：Ubuntu 22.04 Jammy，`amd64`；
-- 已包含 `cgroup_v2.so`、`task_cgroup.so`、`proctrack_cgroup.so`；
-- 使用 MUNGE 认证；
-- 包含 NVIDIA NVML GPU 探测插件。
+- upstream source: SchedMD Slurm 26.05.2;
+- Debian package version: `26.05.2-1`;
+- build target: Ubuntu 22.04 Jammy, `amd64`;
+- includes `cgroup_v2.so`, `task_cgroup.so` and `proctrack_cgroup.so`;
+- uses MUNGE authentication;
+- includes the NVIDIA NVML GPU detection plugin.
 
-NVML 在运行时加载 NVIDIA 驱动提供的 `libnvidia-ml.so.1`，这些 DEB 不绑定特定驱动分支。
+NVML loads `libnvidia-ml.so.1` from the NVIDIA driver at runtime; these DEBs are not tied to a specific driver branch.
 
-## 3. 把产物放到每台主机
+## 3. Put the artifacts on every host
 
-每台主机都需要完整的 `artifacts/slurm-26.05.2-jammy-amd64` 目录。若某台 Worker 上的仓库副本没有该目录，从 `mgmt01` 复制归档（把 SSH 目标换成该节点的）：
+Every host needs the complete `artifacts/slurm-26.05.2-jammy-amd64` directory. If a worker's copy of the repository does not have it, copy the archive from `mgmt01` (substituting that node's SSH target):
 
 ```bash
 scp \
@@ -67,7 +69,7 @@ scp \
   snorlax@192.168.100.215:~/
 ```
 
-在该 Worker 上校验外层归档：
+Verify the outer archive on that worker:
 
 ```bash
 cd ~
@@ -75,29 +77,29 @@ sha256sum -c slurm-26.05.2-jammy-amd64.tar.gz.sha256
 tar -xzf slurm-26.05.2-jammy-amd64.tar.gz
 ```
 
-若所有主机都有完整仓库，可以直接使用仓库内已经解压的目录，无需重复解压。
+If every host already has the full repository, use the already-extracted directory in it; there is no need to extract again.
 
-## 4. 校验 DEB
+## 4. Verify the DEBs
 
-进入产物目录：
+Enter the artifact directory:
 
 ```bash
 cd artifacts/slurm-26.05.2-jammy-amd64
 sha256sum -c SHA256SUMS
 ```
 
-如果从 home 解压，则进入：
+If it was extracted into the home directory instead:
 
 ```bash
 cd ~/slurm-26.05.2-jammy-amd64
 sha256sum -c SHA256SUMS
 ```
 
-任何校验失败都应停止安装并重新复制文件。
+Any checksum failure means stopping the installation and copying the files again.
 
-## 5. 备份旧配置
+## 5. Back up the old configuration
 
-每台主机都执行：
+Run on every host:
 
 ```bash
 sudo systemctl stop slurmctld slurmd 2>/dev/null || true
@@ -109,11 +111,11 @@ if sudo test -d /etc/slurm; then
 fi
 ```
 
-不要删除 `/etc/munge/munge.key`。`mgmt01` 上由角色脚本生成的密钥将作为集群唯一来源。
+Do not delete `/etc/munge/munge.key`. The key generated on `mgmt01` by the role script is the single source for the cluster.
 
-## 6. 安装四个核心包
+## 6. Install the four core packages
 
-在每台主机的产物目录中执行同一命令：
+Run the same command in the artifact directory on every host:
 
 ```bash
 sudo apt update
@@ -124,13 +126,13 @@ sudo apt install -y munge \
   ./debs/slurm-smd-slurmd_26.05.2-1_amd64.deb
 ```
 
-使用 `apt install ./debs/...`，不要用 `dpkg -i` 绕过依赖解析。安装事务中如果出现计划删除关键系统组件，应先取消并检查包冲突。
+Use `apt install ./debs/...`; do not bypass dependency resolution with `dpkg -i`. If the transaction plans to remove critical system components, cancel it first and investigate the package conflict.
 
-当前集群不需要 `slurmdbd`、`slurmrestd`、开发包、PAM、NSS、PMI、Sview 或 Sackd。
+The current cluster does not need `slurmdbd`, `slurmrestd`, the development packages, PAM, NSS, PMI, Sview or Sackd.
 
-## 7. 安装后版本检查
+## 7. Post-installation version check
 
-每台主机都执行：
+Run on every host:
 
 ```bash
 /usr/sbin/slurmctld -V
@@ -139,9 +141,9 @@ dpkg-query -S /usr/sbin/slurmd
 dpkg-query -S /usr/sbin/slurmctld
 ```
 
-期望前两项都是 `26.05.2`，二进制归属为 `slurm-smd-slurmd` 和 `slurm-smd-slurmctld`。即使 dpkg 数据库中仍能看到旧包名，也应以实际二进制版本与归属检查为准。
+The first two are expected to be `26.05.2`, with the binaries owned by `slurm-smd-slurmd` and `slurm-smd-slurmctld`. Even if old package names are still visible in the dpkg database, the actual binary version and ownership checks are what count.
 
-**此时不要用 `sbatch --version` 判断安装结果。** 在还没有 `/etc/slurm/slurm.conf` 的机器上它会失败：
+**Do not use `sbatch --version` to judge the installation at this point.** It fails on a machine that has no `/etc/slurm/slurm.conf` yet:
 
 ```text
 sbatch: error: resolve_ctls_from_dns_srv: res_nsearch error: Unknown host
@@ -149,11 +151,11 @@ sbatch: error: fetch_config: DNS SRV lookup failed
 sbatch: fatal: Could not establish a configuration source
 ```
 
-新版 Slurm 打印版本前会先加载配置，找不到就回退到本集群不使用的 configless DNS SRV 发现。这**不表示安装失败**，装完集群配置后即消失。
+Newer Slurm loads a configuration before printing the version, and when it finds none it falls back to configless DNS SRV discovery, which this cluster does not use. This is **not** an installation failure and disappears once the cluster configuration is installed.
 
-## 8. cgroup v2 和 NVML 检查
+## 8. cgroup v2 and NVML checks
 
-每台主机：
+On every host:
 
 ```bash
 stat -fc %T /sys/fs/cgroup
@@ -164,13 +166,13 @@ find /usr/lib -type f \
   -print
 ```
 
-期望：
+Expected:
 
-- cgroup 文件系统输出 `cgroup2fs`；
-- `nvidia-smi` 正常；
-- 能找到 `cgroup_v2.so` 和 `gpu_nvml.so`。
+- the cgroup filesystem prints `cgroup2fs`;
+- `nvidia-smi` works;
+- both `cgroup_v2.so` and `gpu_nvml.so` are found.
 
-仓库最终安装的 cgroup 配置为：
+The cgroup configuration this repository ultimately installs is:
 
 ```ini
 CgroupPlugin=autodetect
@@ -180,30 +182,30 @@ ConstrainDevices=yes
 ConstrainSwapSpace=yes
 ```
 
-GPU 配置为单卡 `/dev/nvidia0`：
+The GPU configuration is a single card at `/dev/nvidia0`:
 
 ```ini
 AutoDetect=nvml
 Name=gpu File=/dev/nvidia0
 ```
 
-## 9. 此时如何处理服务
+## 9. What to do with the services at this point
 
-刚装完软件包但还没有最终集群配置时，不要尝试用默认配置启动整个集群。
+Right after the packages are installed but before the final cluster configuration exists, do not try to start the whole cluster on the default configuration.
 
-在 `mgmt01` 最终运行：
+`mgmt01` ultimately runs:
 
 ```text
 munge + slurmctld + slurmd
 ```
 
-在每台 GPU Worker 最终运行：
+Every GPU worker ultimately runs:
 
 ```text
 munge + slurmd
 ```
 
-具体启用和重启由以下脚本完成。**注意两者的 `--apply` 都在最后一位，配置文件路径在前**，这与 `10`/`20`/`25` 等编号脚本相反：
+Enabling and restarting them is handled by the scripts below. **Note that `--apply` comes last in both, with the configuration file paths before it** — the opposite of the numbered scripts such as `10`/`20`/`25`:
 
 ```bash
 # mgmt01
@@ -211,18 +213,18 @@ sudo ./scripts/cluster/install-controller-config.sh \
   config/slurm/slurm.conf.generated \
   --apply
 
-# 每台 GPU Worker
+# every GPU worker
 sudo ./scripts/cluster/install-worker-config.sh \
-  <本机munge.key路径> \
-  <本机slurm.conf.generated路径> \
+  <local path to munge.key> \
+  <local path to slurm.conf.generated> \
   --apply
 ```
 
-不要在 Worker 上启用 `slurmctld`。
+Do not enable `slurmctld` on a worker.
 
-## 10. 最终验证
+## 10. Final verification
 
-配置安装后，每台主机分别执行：
+After the configuration is installed, run on each host:
 
 ```bash
 sudo slurmd -C
@@ -230,7 +232,7 @@ sudo slurmd -G
 systemctl --no-pager --full status munge slurmd
 ```
 
-只在 `mgmt01`：
+On `mgmt01` only:
 
 ```bash
 systemctl --no-pager --full status slurmctld
@@ -238,4 +240,4 @@ scontrol ping
 sinfo -N -l
 ```
 
-软件版本、cgroup 插件、GRES、Munge 和逐节点 smoke test 全部通过，才算 Slurm 安装完成。
+The Slurm installation is complete only when the software version, the cgroup plugin, GRES, Munge and the per-node smoke tests all pass.

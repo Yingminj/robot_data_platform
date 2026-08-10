@@ -1,12 +1,14 @@
-# 管理机 `mgmt01` 安装
+# Management node `mgmt01` installation
 
-`mgmt01` 同时运行 PostgreSQL、Redis、MLflow、Slurm Controller、Slurm Worker 和 leLab，并提供一张 RTX 4090 给 Slurm。本文中的命令除特别说明外，都在 `mgmt01` 的仓库根目录执行。
+**English** | [简体中文](02-management-node.zh-CN.md)
 
-向已经运行的集群加 GPU 节点不需要重做本文，见[向已有集群增加 GPU 节点](09-add-gpu-node.md)。
+`mgmt01` runs PostgreSQL, Redis, MLflow, the Slurm controller, a Slurm worker and leLab all at once, and contributes one RTX 4090 to Slurm. Unless stated otherwise, every command in this document is run from the repository root on `mgmt01`.
 
-## 1. 安装前检查
+Adding a GPU node to an already running cluster does not require redoing this document — see [Adding a GPU node to an existing cluster](09-add-gpu-node.md).
 
-确认主机身份和站点配置：
+## 1. Pre-installation checks
+
+Confirm the host identity and the site configuration:
 
 ```bash
 hostname -s
@@ -15,7 +17,7 @@ cp config/site.env.example config/site.env
 editor config/site.env
 ```
 
-期望：
+Expected:
 
 ```text
 hostname: mgmt01
@@ -24,15 +26,15 @@ GPU_NODE_NAMES="mgmt01 gpu01 gpu02 gpu03"
 GPU_NODE_IPS="192.168.100.202 192.168.100.215 192.168.100.216 192.168.100.217"
 ```
 
-两个列表按位置一一对应，长度必须相同，且**在所有主机上取值完全一致**。
+The two lists correspond positionally, must have the same length, and **must have exactly the same values on every host**.
 
-如果需要修改主机名：
+If the hostname needs to change:
 
 ```bash
 sudo hostnamectl set-hostname mgmt01
 ```
 
-修改后重新登录，再执行：
+Log in again afterwards, then run:
 
 ```bash
 sudo ./scripts/05-configure-hosts.sh --apply
@@ -41,23 +43,23 @@ nvidia-smi
 timedatectl show --property=NTPSynchronized --value
 ```
 
-在继续前还要确认：
+Before continuing, also confirm:
 
-- QNAP 已允许**全部**节点 IP 访问 NFS；
-- `/`、Docker 和 PostgreSQL 所在磁盘空间足够；
-- NVIDIA 驱动正常；
-- `DATA_GID` 和 `TRAIN_UID` 未被其他账号占用；
-- 所有主机使用相同的 `config/site.env` 集群字段。
+- the QNAP allows NFS access from **all** node IPs;
+- there is enough disk space for `/`, Docker and PostgreSQL;
+- the NVIDIA driver works;
+- `DATA_GID` and `TRAIN_UID` are not already taken by other accounts;
+- every host uses the same cluster fields in `config/site.env`.
 
-## 2. 准备 Python 3.12 和前端工具链
+## 2. Prepare Python 3.12 and the frontend toolchain
 
-当前 LeRobot 和 leLab 使用 Python 3.12。先检查：
+The current LeRobot and leLab use Python 3.12. Check first:
 
 ```bash
 python3.12 --version
 ```
 
-Ubuntu 24.04 可直接使用系统包。Ubuntu 22.04 没有该命令时，使用团队批准的软件源安装；当前环境采用：
+Ubuntu 24.04 can use the system package directly. When Ubuntu 22.04 does not have the command, install it from a team-approved package source; the current environment uses:
 
 ```bash
 sudo apt update
@@ -67,31 +69,31 @@ sudo apt update
 sudo apt install python3.12 python3.12-dev python3.12-venv
 ```
 
-leLab 前端要求 Node.js 20.19 或更高版本和 npm。它们应安装在执行 `sudo ./scripts/15-...` 的普通用户环境中：
+The leLab frontend requires Node.js 20.19 or newer and npm. They must be installed in the environment of the ordinary user who runs `sudo ./scripts/15-...`:
 
 ```bash
 node --version
 npm --version
 ```
 
-如果使用 nvm，安装脚本会在降权构建前端时加载该用户的 `~/.nvm/nvm.sh`。不要只给 root 安装 Node.js。
+If you use nvm, the installer sources that user's `~/.nvm/nvm.sh` when it drops privileges to build the frontend. Do not install Node.js for root only.
 
-## 3. 安装管理机基础组件
+## 3. Install the management base components
 
 ```bash
 sudo ./scripts/10-install-management.sh --apply
 ```
 
-该脚本会：
+The script:
 
-- 安装 NFS、Chrony、Munge、SSH、Docker 和 NVIDIA Container Toolkit；
-- 创建 `robotdata`、`robot-ingest`、`robot-train`；
-- 创建缓存、运行和 Slurm 状态目录；
-- 将 QNAP 持久挂载到 `/mnt/robot_platform`；
-- 首次生成 `/etc/munge/munge.key`；
-- 为后续 Slurm Controller 和本机 Worker 做准备。
+- installs NFS, Chrony, Munge, SSH, Docker and the NVIDIA Container Toolkit;
+- creates `robotdata`, `robot-ingest` and `robot-train`;
+- creates the cache, runtime and Slurm state directories;
+- mounts the QNAP persistently at `/mnt/robot_platform`;
+- generates `/etc/munge/munge.key` on first run;
+- prepares the machine for the Slurm controller and the local worker.
 
-脚本不会修改 NVIDIA 驱动。第一次运行后检查：
+The script does not touch the NVIDIA driver. After the first run, check:
 
 ```bash
 findmnt /mnt/robot_platform
@@ -101,29 +103,29 @@ sudo -u robot-train test -r /mnt/robot_platform/datasets
 sudo -u robot-train test -w /mnt/robot_platform/jobs
 ```
 
-`/etc/munge/munge.key` 是整个集群唯一的认证密钥。后续只把这一份安全复制到 Worker，不要在 `gpu01` 重新生成。
+`/etc/munge/munge.key` is the single authentication key for the whole cluster. Only ever copy this one securely to the workers; do not generate a new one on `gpu01`.
 
-### Slurm 版本顺序
+### Slurm version ordering
 
-Ubuntu 22.04 的 `slurm-wlm` 只用于让角色脚本完成基础准备，最终应统一升级为支持当前 cgroup v2 配置的 Slurm 26.05.2。推荐顺序是：
+The `slurm-wlm` from Ubuntu 22.04 only exists so the role scripts can finish the base preparation; everything should end up on Slurm 26.05.2, which supports the current cgroup v2 configuration. The recommended order is:
 
 ```text
-先运行 10/20 基础角色脚本
-→ 所有主机安装相同的 Slurm 26.05.2 DEB
-→ 最后安装 Controller/Worker 配置
+run the 10/20 base role scripts first
+→ install the same Slurm 26.05.2 DEBs on every host
+→ install the controller/worker configs last
 ```
 
-使用自建 DEB 后不要随意重新安装 Ubuntu 的 `slurm-wlm`，避免把 26.05.2 替换回旧版。详见 [Slurm 26.05.2 安装](Slurm-INSTALL.md)。
+Once the self-built DEBs are in use, do not casually reinstall Ubuntu's `slurm-wlm`, or 26.05.2 gets replaced by the old version. See [Slurm 26.05.2 installation](Slurm-INSTALL.md).
 
-## 4. 启动 PostgreSQL、Redis 和 MLflow
+## 4. Start PostgreSQL, Redis and MLflow
 
-先确认 NAS 目录存在且 `robot-ingest` 可写：
+First confirm the NAS directory exists and is writable by `robot-ingest`:
 
 ```bash
 sudo -u robot-ingest test -w /mnt/robot_platform/mlflow-artifacts
 ```
 
-然后执行：
+Then run:
 
 ```bash
 sudo ./deploy/management/bootstrap.sh --apply
@@ -134,17 +136,17 @@ sudo docker compose \
 curl --noproxy '*' -fsS http://127.0.0.1:5000/health
 ```
 
-数据位置：
+Data locations:
 
-| 内容 | 位置 |
+| Content | Location |
 |---|---|
-| PostgreSQL | `/var/lib/robot-platform/postgres`，本地 SSD |
-| MLflow artifacts | `/mnt/robot_platform/mlflow-artifacts`，NAS |
-| 数据库密码 | `deploy/management/.env`，权限 `0600` |
+| PostgreSQL | `/var/lib/robot-platform/postgres`, local SSD |
+| MLflow artifacts | `/mnt/robot_platform/mlflow-artifacts`, NAS |
+| Database password | `deploy/management/.env`, mode `0600` |
 
-不要把 PostgreSQL 数据目录放到 NFS，也不要提交 `.env`。
+Do not put the PostgreSQL data directory on NFS, and do not commit `.env`.
 
-## 5. 安装统一训练环境
+## 5. Install the shared training environment
 
 ```bash
 sudo ./scripts/25-install-training-environment.sh --apply
@@ -152,17 +154,17 @@ sudo -u robot-train /opt/robot-platform/train-venv/bin/python -c \
   'import torch, lerobot; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0))'
 ```
 
-期望 `torch.cuda.is_available()` 为 `True`。**所有** Worker 的 `LEROBOT_GIT_REF`、训练环境路径和 Python 主版本必须一致。
+`torch.cuda.is_available()` is expected to be `True`. The `LEROBOT_GIT_REF`, the training environment path and the Python major version must be identical on **all** workers.
 
-## 6. 完成 Slurm
+## 6. Finish Slurm
 
-此时先不要安装 leLab。按以下文档完成 Slurm：
+Do not install leLab yet. Complete Slurm following these documents:
 
-1. 所有主机安装 [Slurm 26.05.2](Slurm-INSTALL.md)；
-2. 按 [Slurm 集群收尾](06-cluster-finalization.md)渲染配置、分发 Munge 密钥；
-3. 从 `mgmt01` 对每个节点分别运行 GPU smoke test。
+1. install [Slurm 26.05.2](Slurm-INSTALL.md) on every host;
+2. render the config and distribute the Munge key following [Slurm cluster finalization](06-cluster-finalization.md);
+3. run the GPU smoke test from `mgmt01` against each node separately.
 
-管理机最终应同时运行：
+In the end the management node should have all of these working:
 
 ```bash
 systemctl is-active munge slurmctld slurmd
@@ -170,26 +172,26 @@ scontrol ping
 sinfo -N -l
 ```
 
-## 7. 安装 leLab
+## 7. Install leLab
 
-只有在全部节点均为 `idle` 且 GPU smoke test 成功后执行：
+Only run this once every node is `idle` and the GPU smoke test has succeeded:
 
 ```bash
 bash -n scripts/15-install-lelab-platform.sh
 sudo ./scripts/15-install-lelab-platform.sh --apply
 ```
 
-脚本会：
+The script:
 
-- 以发起 sudo 的普通用户构建 React 前端；
-- 安装 `/opt/robot-platform/lelab`；
-- 创建 `/opt/robot-platform/lelab-venv`；
-- 首次创建 `/etc/robot-platform/lelab.env` 和模型模板；
-- 启动 `lelab-platform.service`。
+- builds the React frontend as the ordinary user who invoked sudo;
+- installs `/opt/robot-platform/lelab`;
+- creates `/opt/robot-platform/lelab-venv`;
+- creates `/etc/robot-platform/lelab.env` and the model templates on first run;
+- starts `lelab-platform.service`.
 
-安装脚本不会覆盖已经存在的 `/etc/robot-platform/lelab.env`。SSH 探测配置必须按 [leLab 集群 Web](07-lelab-cluster-web.md)单独完成。
+The installer does not overwrite an existing `/etc/robot-platform/lelab.env`. The SSH probing configuration must be done separately, following [leLab cluster web](07-lelab-cluster-web.md).
 
-检查：
+Check:
 
 ```bash
 systemctl is-active lelab-platform
@@ -197,34 +199,34 @@ curl --noproxy '*' -fsS http://127.0.0.1:8000/health
 curl --noproxy '*' -fsS http://127.0.0.1:8000/cluster/status | jq
 ```
 
-## 8. 管理机最终验收
+## 8. Final management node acceptance
 
 ```bash
 ./scripts/90-validate-deployment.sh management
 ```
 
-若本机设置了 `http_proxy`/`https_proxy`，访问本机服务时统一使用 `curl --noproxy '*'`，否则本地 `127.0.0.1` 请求也可能被送到代理并返回 502。
+If `http_proxy`/`https_proxy` are set on this machine, always use `curl --noproxy '*'` when reaching local services; otherwise even a `127.0.0.1` request can be sent to the proxy and come back as 502.
 
-## 9. 端口和备份
+## 9. Ports and backups
 
-当前集群最少需要：
+The current cluster needs at least:
 
-| 端口 | 来源 | 目标 |
+| Port | Source | Destination |
 |---|---|---|
-| TCP 22 | 管理员、`mgmt01` leLab | 所有主机 |
-| TCP 2049 | 所有主机 | QNAP |
-| TCP 6817 | 所有 Worker | `mgmt01` |
-| TCP 6818 | `mgmt01` | 所有 Worker |
-| TCP 8000 | 小组内网 | `mgmt01` |
-| TCP 5000 | 试点期内网 | `mgmt01` |
+| TCP 22 | administrators, leLab on `mgmt01` | all hosts |
+| TCP 2049 | all hosts | QNAP |
+| TCP 6817 | all workers | `mgmt01` |
+| TCP 6818 | `mgmt01` | all workers |
+| TCP 8000 | team intranet | `mgmt01` |
+| TCP 5000 | intranet during the pilot | `mgmt01` |
 
-加节点时这几条都要覆盖新节点，QNAP 的 NFS 白名单也要加上它的 IP。
+When adding a node, all of these rules must cover the new node, and its IP must also be added to the QNAP NFS allow list.
 
-PostgreSQL 5432、Redis 6379 和 Docker TCP API 不应对内网开放。
+PostgreSQL 5432, Redis 6379 and the Docker TCP API should not be exposed to the intranet.
 
-至少备份：
+Back up at least:
 
-- PostgreSQL 每日逻辑备份；
-- `deploy/management/.env` 到受控密码库；
-- `/etc/slurm`、`/etc/robot-platform` 中不含私钥的配置；
-- 当前仓库提交号、Slurm 包版本和 `LEROBOT_GIT_REF`。
+- a daily logical backup of PostgreSQL;
+- `deploy/management/.env` into a controlled password vault;
+- the configuration in `/etc/slurm` and `/etc/robot-platform` that contains no private keys;
+- the current repository commit, the Slurm package version and `LEROBOT_GIT_REF`.
