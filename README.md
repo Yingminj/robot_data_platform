@@ -273,6 +273,72 @@ Final acceptance is not "the service is active", it is:
 - `config/site.env`, `deploy/management/.env`, the Munge key, and the leLab SSH private key and tokens must never be committed;
 - after a failure you can fix the cause and re-run the same step, but once the self-built Slurm DEBs are in use, read the version-protection notes in [Slurm installation](docs/Slurm-INSTALL.md) before re-running `10`/`20`.
 
+## Developing LeRobot in the `lerobot/` submodule
+
+`lerobot/` is a Git submodule pointing at [Yingminj/lerobot_dev](https://github.com/Yingminj/lerobot_dev.git), a fork of `huggingface/lerobot`. It is a development checkout for reading and modifying the framework — it is **not** what the cluster trains with. Training jobs run out of `/opt/robot-platform/train-venv`, which `25-install-training-environment.sh` installs from `LEROBOT_GIT_URL@LEROBOT_GIT_REF`. Keep the submodule on the same commit as `LEROBOT_GIT_REF` (currently `v0.6.0`), otherwise you will write code against APIs the deployed environment does not have.
+
+Clone with the submodule, or fill it in afterwards:
+
+```bash
+git clone --recurse-submodules https://github.com/Yingminj/robot_data_platform.git
+# already cloned without it:
+git submodule update --init lerobot
+```
+
+Inside the submodule, `origin` is the fork and `upstream` is `huggingface/lerobot`:
+
+```bash
+git -C lerobot remote -v
+git -C lerobot fetch upstream      # pick up new upstream releases
+```
+
+### The parent repository stores a commit ID, not files
+
+`git add lerobot` in the parent stages a single 40-character SHA — the submodule's current `HEAD`. It never stages the contents of files under `lerobot/`, and `git commit` in the parent never pushes anything to `lerobot_dev`. Two repositories, two independent pushes.
+
+Two consequences are worth remembering, because neither announces itself:
+
+- Editing a file under `lerobot/` and then running `git add lerobot && git commit` in the parent records **nothing**. The submodule's `HEAD` has not moved, so the SHA is unchanged and the commit is empty.
+- Committing inside the submodule without pushing, then committing the pointer in the parent, produces a parent commit that references a SHA existing only on that one machine. Everyone else — including you on another node — gets `fatal: reference is not a tree` from `git submodule update`.
+
+So always work in this order: contents, publish, pointer.
+
+```bash
+# 1. contents, inside the submodule
+git -C lerobot add <files>
+git -C lerobot commit -m "..."
+
+# 2. publish them (the first push of a new branch needs -u)
+git -C lerobot push -u origin dev
+
+# 3. only now record the new pointer in the parent
+git add lerobot && git commit -m "bump lerobot to ..."
+```
+
+Let Git enforce step 2 instead of remembering it:
+
+```bash
+git config --global push.recurseSubmodules check   # or on-demand, to push the submodule automatically
+```
+
+### Reading the status output
+
+`git status` in the parent describes the submodule with a one-character code, and the two codes mean very different things:
+
+| Output | Meaning | Does `git add lerobot` record anything? |
+|---|---|---|
+| `? lerobot` | untracked files inside the submodule | no — `HEAD` has not moved |
+| `M lerobot` | the submodule `HEAD` differs from the recorded pointer | yes — the new SHA |
+
+`git submodule status` says the same thing more precisely: a leading `+` means the checkout has moved off the recorded commit, `-` means the submodule is not initialized, and a leading space means it matches.
+
+### Getting a change onto the cluster
+
+A commit in `lerobot_dev` changes nothing on the GPU nodes by itself. There are two deployment paths:
+
+- **New policy — use a plugin.** Package it as a `lerobot_policy_<name>` distribution and `pip install -e` it into each node's `train-venv`. `lerobot-train` auto-imports every installed distribution with that prefix, so edits take effect with no reinstall and no fork of LeRobot at all. Register it in `/etc/robot-platform/model-templates.json` to make it selectable in leLab, where the template `id` must equal its `policy_type`.
+- **Framework change — re-deploy the pin.** Tag the fork, point `LEROBOT_GIT_URL` and `LEROBOT_GIT_REF` in `config/site.env` at that tag, and re-run `25-install-training-environment.sh --apply` on every node. Move the submodule pointer to the same tag so the checkout and the deployed environment stay in agreement.
+
 ## Not included yet
 
 The repository does not yet contain a complete data governance workflow:

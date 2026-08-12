@@ -273,6 +273,72 @@ curl --noproxy '*' -fsS http://127.0.0.1:8000/cluster/templates | jq
 - `config/site.env`、`deploy/management/.env`、Munge 密钥、leLab SSH 私钥和 Token 均不得提交；
 - 失败后可在修正原因后重跑相同步骤，但使用自建 Slurm DEB 后，重跑 `10`/`20` 前应先阅读 [Slurm 安装说明](docs/Slurm-INSTALL.zh-CN.md)中的版本保护提示。
 
+## 在 `lerobot/` 子模块中开发 LeRobot
+
+`lerobot/` 是一个 Git 子模块，指向 [Yingminj/lerobot_dev](https://github.com/Yingminj/lerobot_dev.git)，即 `huggingface/lerobot` 的 fork。它只是用来阅读和修改框架的开发副本，**不是**集群实际训练时使用的代码。训练作业跑在 `/opt/robot-platform/train-venv` 中，由 `25-install-training-environment.sh` 从 `LEROBOT_GIT_URL@LEROBOT_GIT_REF` 安装。子模块应保持在与 `LEROBOT_GIT_REF` 相同的提交上（当前为 `v0.6.0`），否则你写出的代码会依赖部署环境里并不存在的 API。
+
+克隆时一并拉取子模块，或事后补齐：
+
+```bash
+git clone --recurse-submodules https://github.com/Yingminj/robot_data_platform.git
+# 已经克隆但没有子模块内容：
+git submodule update --init lerobot
+```
+
+在子模块内部，`origin` 是自己的 fork，`upstream` 是 `huggingface/lerobot`：
+
+```bash
+git -C lerobot remote -v
+git -C lerobot fetch upstream      # 获取上游新版本
+```
+
+### 父仓库记录的是一个提交 ID，不是文件
+
+在父仓库执行 `git add lerobot`，暂存的只是一个 40 位 SHA —— 子模块当前的 `HEAD`。它不会暂存 `lerobot/` 下任何文件的内容，父仓库的 `git commit` 也不会向 `lerobot_dev` 推送任何东西。这是两个仓库、两次互相独立的 push。
+
+有两个后果值得记住，因为它们都不会主动报错：
+
+- 修改了 `lerobot/` 下的文件后，在父仓库执行 `git add lerobot && git commit`，**什么都不会被记录**。子模块的 `HEAD` 没有移动，SHA 没有变化，这次提交是空的。
+- 在子模块内提交但没有 push，就先在父仓库提交了指针，会得到一个引用了「只存在于这台机器上」的 SHA 的父提交。其他人（包括在另一个节点上的你自己）执行 `git submodule update` 时会看到 `fatal: reference is not a tree`。
+
+因此顺序固定为：先内容，再发布，最后指针。
+
+```bash
+# 1. 内容，在子模块里提交
+git -C lerobot add <files>
+git -C lerobot commit -m "..."
+
+# 2. 发布出去（新分支第一次 push 需要 -u）
+git -C lerobot push -u origin dev
+
+# 3. 到这一步才在父仓库记录新指针
+git add lerobot && git commit -m "bump lerobot to ..."
+```
+
+与其靠记忆，不如让 Git 替你检查第 2 步：
+
+```bash
+git config --global push.recurseSubmodules check   # 或 on-demand，自动连带推送子模块
+```
+
+### 看懂状态输出
+
+父仓库的 `git status` 用一个字符描述子模块，而这两个字符的含义完全不同：
+
+| 输出 | 含义 | `git add lerobot` 会记录内容吗？ |
+|---|---|---|
+| `? lerobot` | 子模块内有未跟踪的文件 | 不会 —— `HEAD` 没有移动 |
+| `M lerobot` | 子模块 `HEAD` 与已记录的指针不一致 | 会 —— 记录新的 SHA |
+
+`git submodule status` 的表述更精确：前缀 `+` 表示当前检出已经偏离了被记录的提交，`-` 表示子模块尚未初始化，前缀为空格表示一致。
+
+### 让改动真正生效到集群上
+
+`lerobot_dev` 上的一次提交，本身不会改变 GPU 节点上的任何东西。有两条部署路径：
+
+- **新策略 —— 用插件。** 将其打包成 `lerobot_policy_<name>` 发行包，在每个节点的 `train-venv` 里 `pip install -e`。`lerobot-train` 会自动导入所有带该前缀的已安装发行包，因此改完即生效，无需重装，也完全不必 fork LeRobot。在 `/etc/robot-platform/model-templates.json` 中登记后即可在 leLab 中选择，注意模板的 `id` 必须等于其 `policy_type`。
+- **改框架本身 —— 重新部署版本锚点。** 给 fork 打 tag，把 `config/site.env` 中的 `LEROBOT_GIT_URL` 和 `LEROBOT_GIT_REF` 指向该 tag，然后在每个节点上重跑 `25-install-training-environment.sh --apply`。同时把子模块指针移到同一个 tag，让开发副本与部署环境保持一致。
+
 ## 当前不包含的功能
 
 仓库目前没有完整的数据治理业务：
