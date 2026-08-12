@@ -39,6 +39,9 @@ load_site_config() {
   source "${SITE_CONFIG}"
   TRAIN_ENV_ROOT="${TRAIN_ENV_ROOT:-/opt/robot-platform/train-venv}"
   LEROBOT_GIT_REF="${LEROBOT_GIT_REF:-v0.6.0}"
+  # Policy extras a training node installs. Adding a policy with third-party
+  # dependencies means adding its extra here, not editing the installer.
+  LEROBOT_EXTRAS="${LEROBOT_EXTRAS:-core_scripts,training,smolvla,pi,vita}"
 
   local required=(
     MANAGEMENT_HOST MANAGEMENT_IP NAS_IP NAS_EXPORT NAS_MOUNT PLATFORM_ROOT
