@@ -20,5 +20,16 @@
     "cpus_per_task": 8,
     "memory_gb": 32,
     "description": "LeRobot diffusion-policy training."
+  },
+  {
+    "id": "vita",
+    "label": "VITA (Vision-to-Action Flow Matching)",
+    "policy_type": "vita",
+    "python_executable": "/opt/robot-platform/train-venv/bin/python",
+    "partition": "train",
+    "min_gpu_memory_mb": 12000,
+    "cpus_per_task": 8,
+    "memory_gb": 32,
+    "description": "LeRobot VITA training; needs the lerobot[vita] extra in the training venv."
   }
 ]

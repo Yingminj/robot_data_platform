@@ -49,7 +49,11 @@ load_site_config
 verify_lerobot_dependencies() {
   local pyproject="$1"
   local extras="$2"
-  runuser -u "${TRAIN_USER}" -- "${TRAIN_ENV_ROOT}/bin/python" - "${pyproject}" "${extras}" <<'PY'
+  # Runs as root, unlike the import check below: this reads pyproject.toml from
+  # the clone, which lives in an operator's home directory that ${TRAIN_USER}
+  # has no path into. Only the venv's own metadata is inspected, nothing is
+  # written, so root buys reach without side effects.
+  "${TRAIN_ENV_ROOT}/bin/python" - "${pyproject}" "${extras}" <<'PY'
 import sys, tomllib
 import importlib.metadata as md
 
@@ -123,7 +127,14 @@ sync_lerobot_from_submodule() {
     || die "the synced source does not import; the node is now broken, reinstall with --apply"
 
   local report
-  report="$(verify_lerobot_dependencies "${src_root}/pyproject.toml" "${LEROBOT_EXTRAS}")"
+  # The sync itself is already done at this point, so a verifier that cannot run
+  # must say exactly that instead of dying on a raw traceback that reads like
+  # the sync failed.
+  if ! report="$(verify_lerobot_dependencies "${src_root}/pyproject.toml" "${LEROBOT_EXTRAS}" 2>&1)"; then
+    warn "source synced from ${ref}, but dependency verification could not run:"
+    printf '%s\n' "${report}" | sed 's/^/  /' >&2
+    die "verify the venv by hand before training on this node"
+  fi
   if [[ "${report}" == MISSING* ]]; then
     warn "the synced source declares dependencies this venv does not satisfy:"
     printf '%s\n' "${report}" | tail -n +2 | sed 's/^/  /' >&2
