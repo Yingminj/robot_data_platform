@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import re
 import shlex
@@ -48,6 +49,63 @@ _TERMINAL_STATES = frozenset(
     }
 )
 
+# LeRobot caps its torchcodec decoder cache at 100 entries, and every eviction
+# leaks host RAM in the DataLoader worker that triggered it. A dataset with more
+# video files than the cap therefore grows its workers without bound until the
+# job's cgroup limit is hit and the kernel kills a worker mid-step -- the
+# traceback then surfaces wherever the main process happened to be, usually
+# ``save_checkpoint``. Sizing the cache above the file count removes eviction
+# entirely, which measurably stops the growth and speeds decoding up ~20%.
+#
+# Recording one video file per episode (``video_files_size_in_mb: 1``) is what
+# makes this reachable here: it turns a 120-episode dataset from ~37 files into
+# 360. ``episodes * cameras`` is the exact upper bound on distinct files, and
+# over-estimating is free -- the LRU is a cap, not a preallocation, so nothing
+# is held for files the dataset does not have.
+_DECODER_CACHE_ENV = "LEROBOT_VIDEO_DECODER_CACHE_SIZE"
+_DECODER_MB = 4  # measured ~3.3 MB resident per cached decoder, rounded up
+_DECODER_MEMORY_FRACTION = 0.5  # of the job's --mem, left for decoders
+
+
+def _video_decoder_cache_size(
+    dataset_root: str | None, num_workers: int, memory_gb: int
+) -> int | None:
+    """Return a decoder-cache cap that avoids eviction, or ``None`` to keep LeRobot's.
+
+    Returns ``None`` when the dataset is not readable locally (e.g. a Hub repo
+    id with no root), since the file count cannot be known before the job runs.
+    """
+    if not dataset_root:
+        return None
+    info_path = Path(dataset_root) / "meta" / "info.json"
+    try:
+        info = json.loads(info_path.read_text())
+        episodes = int(info["total_episodes"])
+        cameras = sum(1 for key in info.get("features", {}) if key.startswith("observation.images."))
+    except Exception as exc:
+        logger.warning("Could not size the video decoder cache from %s: %s", info_path, exc)
+        return None
+    if episodes <= 0 or cameras <= 0:
+        return None
+
+    needed = episodes * cameras
+    # Each worker keeps its own cache, so the resident cost is per worker.
+    budget_mb = memory_gb * 1024 * _DECODER_MEMORY_FRACTION
+    affordable = int(budget_mb / (max(num_workers, 1) * _DECODER_MB))
+    if affordable < needed:
+        logger.warning(
+            "Dataset %s has %d video files but only %d decoders fit in %d GB across "
+            "%d workers; workers will still leak. Raise the template memory_gb or "
+            "lower num_workers.",
+            dataset_root,
+            needed,
+            affordable,
+            memory_gb,
+            num_workers,
+        )
+        return max(affordable, 1)
+    return needed
+
 
 class SlurmJobRunner:
     """Submit through ``sbatch`` and tail the shared Slurm output file.
@@ -64,11 +122,13 @@ class SlurmJobRunner:
         log_file_path: Path,
         requested_node: str | None = None,
         reserved_nodes: set[str] | None = None,
+        preferred_node: str | None = None,
     ) -> None:
         self._metrics = metrics
         self._log_file_path = log_file_path
         self._requested_node = requested_node
         self._reserved_nodes = reserved_nodes or set()
+        self._preferred_node = preferred_node
         self._slurm_job_id: str | None = None
         self._node_name: str | None = None
         self._slurm_output_path: Path | None = None
@@ -86,6 +146,9 @@ class SlurmJobRunner:
             template.min_gpu_memory_mb,
             self._requested_node,
             self._reserved_nodes,
+            policy_type=template.policy_type,
+            python_executable=template.python_executable,
+            preferred_node=self._preferred_node,
         )
         self._node_name = node.name
 
@@ -101,8 +164,11 @@ class SlurmJobRunner:
             output_dir,
             python_executable=template.python_executable,
         )
+        decoder_cache_size = _video_decoder_cache_size(
+            config.dataset_root, config.num_workers, template.memory_gb
+        )
         script_path = job_dir / "job.sbatch"
-        script_path.write_text(self._batch_script(command))
+        script_path.write_text(self._batch_script(command, decoder_cache_size))
         script_path.chmod(0o750)
 
         sbatch = [
@@ -187,7 +253,7 @@ class SlurmJobRunner:
         return self._node_name
 
     @staticmethod
-    def _batch_script(command: list[str]) -> str:
+    def _batch_script(command: list[str], decoder_cache_size: int | None = None) -> str:
         """Build a fixed script and re-check out-of-band CUDA use on-node.
 
         Slurm sets ``HOME`` from the job user's passwd entry, but that home
@@ -203,9 +269,18 @@ class SlurmJobRunner:
         service's own ``HF_HOME`` — a management-host path that a freshly added
         worker will not have. ``LELAB_JOB_CACHE_ROOT`` therefore wins over the
         inherited value rather than deferring to it.
+
+        ``decoder_cache_size`` sizes LeRobot's video decoder cache above the
+        dataset's file count; see :func:`_video_decoder_cache_size`. It is set
+        with ``:-`` so an operator-supplied value still wins.
         """
 
         command_line = shlex.join(command)
+        decoder_export = (
+            ""
+            if decoder_cache_size is None
+            else f'export {_DECODER_CACHE_ENV}="${{{_DECODER_CACHE_ENV}:-{decoder_cache_size}}}"\n'
+        )
         return (
             "#!/usr/bin/env bash\n"
             "set -Eeuo pipefail\n"
@@ -224,6 +299,7 @@ class SlurmJobRunner:
             "  fi\n"
             "fi\n"
             "export PYTHONUNBUFFERED=1\n"
+            f"{decoder_export}"
             'cache_root="${LELAB_JOB_CACHE_ROOT:-}"\n'
             'if [ -n "$cache_root" ]; then\n'
             "  # An explicit job cache root overrides what sbatch inherited from the\n"

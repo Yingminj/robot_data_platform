@@ -163,8 +163,12 @@ def build_training_command(
     # output_dir (e.g. ~/.cache/.../outputs/train) is baked into the staged config and
     # the pod crashes trying to mkdir it under /Users. Checkpoints land on the Hub repo
     # anyway, so we omit it for cloud and let lerobot pick its in-pod default.
+    # ``--key=value``, not ``--key value``: lerobot reads output_dir and config_path
+    # back out of sys.argv with parser.parse_arg(), which matches only the "--key="
+    # prefix. Passed as two tokens they parse fine into the dataclass but are
+    # invisible to that lookup, so a resume dies with "A config_path is expected".
     if not is_cloud:
-        cmd.extend(["--output_dir", output_dir])
+        cmd.append(f"--output_dir={output_dir}")
     cmd.extend(["--resume", "true" if request.resume else "false"])
     if request.job_name:
         cmd.extend(["--job_name", request.job_name])
@@ -208,7 +212,7 @@ def build_training_command(
     # Advanced
     cmd.extend(["--use_policy_training_preset", "true" if request.use_policy_training_preset else "false"])
     if request.config_path:
-        cmd.extend(["--config_path", request.config_path])
+        cmd.append(f"--config_path={request.config_path}")
 
     # HF Jobs: --job.target=<flavor> dispatches the run remotely (lerobot commit #3856).
     # Image/timeout use lerobot's JobConfig defaults. lelab tags its jobs; lerobot always

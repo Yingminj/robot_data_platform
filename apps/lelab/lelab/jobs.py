@@ -1057,6 +1057,11 @@ class JobRegistry:
             record.ended_at = None
             record.exit_code = None
             record.error_message = None
+            # Keep the node the run started on as a preference: the workers do not
+            # share /opt, so a resume that wanders onto a different one can meet a
+            # train-venv without this job's policy. It stays a preference, not a
+            # requirement, so a busy or drained original node still yields.
+            previous_node = record.node_name
             record.slurm_job_id = None
             record.node_name = None
 
@@ -1072,6 +1077,7 @@ class JobRegistry:
                     and item.state == "running"
                     and item.node_name
                 },
+                preferred_node=previous_node,
             )
             self._runners[job_id] = runner
             self._persist(record, force=True)

@@ -19,7 +19,11 @@ import pytest
 
 
 def _arg_value(cmd: list[str], flag: str) -> str:
-    """Return the value passed to `--flag`. Fails the test if absent."""
+    """Return the value passed to `--flag`, in either `--flag v` or `--flag=v` form."""
+    prefix = f"{flag}="
+    for arg in cmd:
+        if arg.startswith(prefix):
+            return arg[len(prefix) :]
     assert flag in cmd, f"{flag} missing from {cmd}"
     return cmd[cmd.index(flag) + 1]
 
@@ -177,3 +181,25 @@ def test_local_target_keeps_push_to_hub() -> None:
     assert _arg_value(cmd, "--policy.push_to_hub") == "true"
     assert _arg_value(cmd, "--policy.repo_id") == "me/x"
     assert "--job.target" not in cmd
+
+
+def test_resume_flags_use_the_equals_form_lerobot_reads() -> None:
+    """lerobot re-reads these two out of sys.argv with parse_arg(), which only
+    matches "--key=value"; emitted as two tokens a resume aborts with
+    "A config_path is expected when resuming a run"."""
+
+    from lelab.train import TrainingRequest, build_training_command
+
+    req = TrainingRequest(
+        dataset_repo_id="lerobot/pusht",
+        resume=True,
+        config_path="/jobs/run/checkpoints/033000/pretrained_model/train_config.json",
+    )
+    cmd = build_training_command(req, "/jobs/run")
+
+    assert "--config_path" not in cmd
+    assert "--output_dir" not in cmd
+    assert (
+        "--config_path=/jobs/run/checkpoints/033000/pretrained_model/train_config.json" in cmd
+    )
+    assert "--output_dir=/jobs/run" in cmd

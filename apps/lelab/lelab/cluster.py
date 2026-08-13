@@ -24,8 +24,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import shlex
 import socket
 import subprocess
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -45,7 +49,10 @@ class ModelTemplate(BaseModel):
     partition: str = "train"
     min_gpu_memory_mb: int = 0
     cpus_per_task: int = 8
-    memory_gb: int = 32
+    # Nodes have ~60 GB of RealMemory and one GPU each, so at most one training
+    # job runs per node. 48 leaves headroom for the OS and, on mgmt01, for the
+    # MLflow/Postgres/Redis/LeLab services that sit outside Slurm's accounting.
+    memory_gb: int = 48
     description: str = ""
 
 
@@ -117,14 +124,18 @@ def _slurm_states() -> dict[str, str]:
     return states
 
 
-def _probe_command(name: str, address: str, *remote_args: str) -> list[str]:
+def _is_local_node(name: str, address: str) -> bool:
     local_names = {
         "localhost",
         socket.gethostname(),
         socket.gethostname().split(".", 1)[0],
         socket.getfqdn(),
     }
-    if name in local_names or address in local_names:
+    return name in local_names or address in local_names
+
+
+def _probe_command(name: str, address: str, *remote_args: str) -> list[str]:
+    if _is_local_node(name, address):
         return list(remote_args)
     timeout = os.environ.get("LELAB_SSH_CONNECT_TIMEOUT", "3")
     command = [
@@ -259,10 +270,98 @@ def get_cluster_node(name: str) -> ClusterNode:
     raise ValueError(f"Unknown cluster node: {name}")
 
 
+# ``/opt/robot-platform`` sits on each node's root filesystem, so every worker
+# owns its ``train-venv`` and they drift apart: a node whose LeRobot predates a
+# policy (or never got its extra installed) rejects ``--policy.type`` in argparse
+# and the job dies seconds after being allocated. Asking the node's own
+# interpreter which policies it can build turns that into a submit-time error.
+_POLICY_PROBE_TTL_S = 300.0
+_POLICY_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_policy_probe_cache: dict[tuple[str, str, str], tuple[float, bool | None]] = {}
+_policy_probe_lock = threading.Lock()
+
+
+def _policy_probe_snippet(policy_type: str) -> str:
+    """Print ``ok``/``missing``, or ``unknown`` when this LeRobot cannot be asked.
+
+    ``get_policy_class`` is the same lookup ``lerobot_train`` performs, so a
+    node that answers ``ok`` can genuinely build the policy. An import failure
+    means a LeRobot too different to interrogate, which is reported as unknown
+    rather than missing so an unrecognised build is never silently excluded.
+    """
+
+    return (
+        "try:\n"
+        "    from lerobot.policies.factory import get_policy_class\n"
+        "except Exception:\n"
+        "    print('unknown'); raise SystemExit(0)\n"
+        "try:\n"
+        f"    get_policy_class({policy_type!r})\n"
+        "    print('ok')\n"
+        "except Exception:\n"
+        "    print('missing')\n"
+    )
+
+
+def node_supports_policy(
+    node: ClusterNode, python_executable: str, policy_type: str
+) -> bool | None:
+    """Return True/False, or ``None`` when support could not be determined.
+
+    Results are cached briefly: a venv does not gain policies mid-session, and
+    the probe costs an SSH round trip per node.
+    """
+
+    if not policy_type or not _POLICY_NAME_RE.match(policy_type):
+        return None
+    key = (node.name, python_executable, policy_type)
+    now = time.monotonic()
+    with _policy_probe_lock:
+        cached = _policy_probe_cache.get(key)
+        if cached is not None and now - cached[0] < _POLICY_PROBE_TTL_S:
+            return cached[1]
+
+    snippet = _policy_probe_snippet(policy_type)
+    if _is_local_node(node.name, node.address):
+        command = [python_executable, "-c", snippet]
+    else:
+        # ssh joins its trailing arguments into one remote shell command, so the
+        # snippet has to survive a round of shell parsing.
+        command = _probe_command(
+            node.name, node.address, python_executable, "-c", shlex.quote(snippet)
+        )
+    try:
+        result = _run(command, timeout=30.0)
+        answer = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("Policy probe failed on %s: %s", node.name, exc)
+        answer = ""
+
+    supported: bool | None
+    if answer == "ok":
+        supported = True
+    elif answer == "missing":
+        supported = False
+    else:
+        supported = None
+        logger.warning(
+            "Could not determine whether %s supports policy %r; allowing it",
+            node.name,
+            policy_type,
+        )
+
+    with _policy_probe_lock:
+        _policy_probe_cache[key] = (now, supported)
+    return supported
+
+
 def select_idle_node(
     min_gpu_memory_mb: int = 0,
     requested_node: str | None = None,
     excluded_nodes: set[str] | None = None,
+    policy_type: str | None = None,
+    python_executable: str | None = None,
+    preferred_node: str | None = None,
 ) -> ClusterNode:
     status = list_cluster_nodes()
     if not status.enabled:
@@ -289,7 +388,37 @@ def select_idle_node(
             else ""
         )
         raise ValueError(f"No idle GPU node is available{suffix}")
-    return max(candidates, key=lambda node: node.memory_free_mb or 0)
+
+    if policy_type and python_executable:
+        with ThreadPoolExecutor(
+            max_workers=min(max(len(candidates), 1), 8), thread_name_prefix="policy-probe"
+        ) as pool:
+            supported = list(
+                pool.map(
+                    lambda node: node_supports_policy(node, python_executable, policy_type),
+                    candidates,
+                )
+            )
+        rejected = [
+            node.name for node, ok in zip(candidates, supported, strict=True) if ok is False
+        ]
+        candidates = [
+            node for node, ok in zip(candidates, supported, strict=True) if ok is not False
+        ]
+        if not candidates:
+            raise ValueError(
+                f"No idle GPU node can run policy {policy_type!r}; "
+                f"{', '.join(sorted(rejected))} "
+                f"{'has' if len(rejected) == 1 else 'have'} no such policy in "
+                f"{python_executable}"
+            )
+
+    # Prefer the node a resumed run started on, so a resume does not wander onto
+    # a worker with a different environment; fall back to the emptiest GPU.
+    return max(
+        candidates,
+        key=lambda node: (node.name == preferred_node, node.memory_free_mb or 0),
+    )
 
 
 def _default_templates() -> list[ModelTemplate]:
