@@ -32,3 +32,5 @@ SDK_PYTHON/
 dataset/
 datasets/
 test_data/
+
+record_chunk.txt

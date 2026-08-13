@@ -275,7 +275,7 @@ Final acceptance is not "the service is active", it is:
 
 ## Developing LeRobot in the `lerobot/` submodule
 
-`lerobot/` is a Git submodule pointing at [Yingminj/lerobot_dev](https://github.com/Yingminj/lerobot_dev.git), a fork of `huggingface/lerobot`. It is a development checkout for reading and modifying the framework — it is **not** what the cluster trains with. Training jobs run out of `/opt/robot-platform/train-venv`, which `25-install-training-environment.sh` installs from `LEROBOT_GIT_URL@LEROBOT_GIT_REF`. Keep the submodule on the same commit as `LEROBOT_GIT_REF` (currently `v0.6.0`), otherwise you will write code against APIs the deployed environment does not have.
+`lerobot/` is a Git submodule pointing at [Yingminj/lerobot_dev](https://github.com/Yingminj/lerobot_dev.git), a fork of `huggingface/lerobot`. It is a development checkout for reading and modifying the framework — editing it changes nothing on the cluster until you deploy it. Training jobs run out of `/opt/robot-platform/train-venv`, which `25-install-training-environment.sh` installs from `LEROBOT_GIT_URL@LEROBOT_GIT_REF` and later updates in place from this checkout with `--sync-lerobot`. Keep the submodule on the same commit as `LEROBOT_GIT_REF` (currently `dev`), otherwise you will write code against APIs the deployed environment does not have.
 
 Clone with the submodule, or fill it in afterwards:
 
@@ -334,9 +334,83 @@ git config --global push.recurseSubmodules check   # or on-demand, to push the s
 
 ### Getting a change onto the cluster
 
-A commit in `lerobot_dev` changes nothing on the GPU nodes by itself. There are two deployment paths:
+A commit in `lerobot_dev` changes nothing on the nodes by itself. `/opt` is **not** shared between nodes, so every node Slurm can schedule needs its own update — list them with `sinfo -N -l`. Skip one and a job that lands there dies on `import`, usually much later than the deployment you thought was finished.
 
-- **New policy — use a plugin.** Package it as a `lerobot_policy_<name>` distribution and `pip install -e` it into each node's `train-venv`. `lerobot-train` auto-imports every installed distribution with that prefix, so edits take effect with no reinstall and no fork of LeRobot at all. Register it in `/etc/robot-platform/model-templates.json` to make it selectable in leLab, where the template `id` must equal its `policy_type`.
+The two roles do different amounts of work: the management node publishes the code and owns the leLab configuration, the workers only pull and update their environment.
+
+#### On the management node (mgmt01)
+
+**1. Publish the code.** Contents, publish, pointer — the order from [The parent repository stores a commit ID, not files](#the-parent-repository-stores-a-commit-id-not-files):
+
+```bash
+git -C lerobot add <files>
+git -C lerobot commit -m "..."
+git -C lerobot push origin dev              # first push of a new branch needs -u
+git add lerobot && git commit -m "bump lerobot to ..." && git push
+```
+
+**2. Update the training environment.**
+
+```bash
+sudo ./scripts/25-install-training-environment.sh --sync-lerobot --apply
+```
+
+This rsyncs `lerobot/src/lerobot/` over the installed package (with `--delete`, so a file you removed in the fork stops shadowing the new code), stamps `SUBMODULE_REVISION`, re-checks `import lerobot`, and verifies the venv still satisfies the extras declared in the submodule's `pyproject.toml`.
+
+It copies source files and resolves **no** dependencies. If your change adds a third-party import, the script refuses to call the node ready and prints the exact `pip install` to run; add the dependency to an extra in `pyproject.toml` too, so a fresh install gets it without the manual step.
+
+**3. Register a new policy in leLab** — only when you added a new `policy_type`. Append an entry to `/etc/robot-platform/model-templates.json`, which no script maintains after `15-install-lelab-platform.sh` seeds it on first install:
+
+```json
+{
+  "id": "act_delta",
+  "label": "ACT (relative actions)",
+  "policy_type": "act_delta",
+  "python_executable": "/opt/robot-platform/train-venv/bin/python",
+  "partition": "train",
+  "min_gpu_memory_mb": 8000,
+  "cpus_per_task": 8,
+  "memory_gb": 48,
+  "description": "..."
+}
+```
+
+`id` must equal `policy_type`, and leLab rejects the whole file if any entry breaks that rule or if the JSON is malformed — which takes the model list down for everyone, so check the endpoint afterwards. The file is re-read on every request, so no restart is needed. Mirror the entry into the version-controlled `apps/lelab/config/model-templates.json.example` as well, or a node installed later will not have it.
+
+Two limits are worth knowing before planning an experiment around the web UI: leLab emits a fixed set of policy flags (`--policy.type`, `.device`, `.use_amp`, `.push_to_hub`, `.repo_id` — see `apps/lelab/lelab/train.py`), so a policy variant that needs any other `--policy.*` flag has to be launched with `sbatch` or the CLI; and since `id` must equal `policy_type`, one policy cannot be offered as several presets.
+
+#### On every GPU worker (gpu01, gpu02, …)
+
+Pull, then update the environment. Nothing else — the workers hold no leLab configuration.
+
+```bash
+git pull
+git submodule update --init --recursive
+sudo ./scripts/25-install-training-environment.sh --sync-lerobot --apply
+```
+
+`--sync-lerobot` copies from the checkout **on that node**, so the pull is what actually carries your change across; skip it and the script cheerfully re-syncs the old revision. A worker with no checkout can install from GitHub instead:
+
+```bash
+sudo ./scripts/25-install-training-environment.sh --apply
+```
+
+which rebuilds the venv from `LEROBOT_GIT_URL@LEROBOT_GIT_REF` and re-resolves every dependency — much slower, but it needs no local clone and it does pick up new dependencies on its own.
+
+#### Verify, on each node
+
+```bash
+/opt/robot-platform/train-venv/bin/python -c \
+  'import lerobot, pathlib; print((pathlib.Path(lerobot.__file__).parent / "SUBMODULE_REVISION").read_text())'
+/opt/robot-platform/train-venv/bin/python -c \
+  'from lerobot.policies.factory import get_policy_class; print(get_policy_class("<policy_type>"))'
+```
+
+The first prints the revision the installed files actually came from — pip's own metadata still describes whatever it last installed, so it is not evidence. The second fails loudly when a new policy is not registered, which is otherwise only discovered by a training job that dies at startup.
+
+#### Two alternatives to this workflow
+
+- **New policy, no fork — use a plugin.** Package it as a `lerobot_policy_<name>` distribution and `pip install -e` it into each node's `train-venv`. `lerobot-train` auto-imports every installed distribution with that prefix, so edits take effect with no reinstall and no fork of LeRobot at all. It still needs the leLab template entry from step 3.
 - **Framework change — re-deploy the pin.** Tag the fork, point `LEROBOT_GIT_URL` and `LEROBOT_GIT_REF` in `config/site.env` at that tag, and re-run `25-install-training-environment.sh --apply` on every node. Move the submodule pointer to the same tag so the checkout and the deployed environment stay in agreement.
 
 ## Not included yet

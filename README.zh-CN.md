@@ -275,7 +275,7 @@ curl --noproxy '*' -fsS http://127.0.0.1:8000/cluster/templates | jq
 
 ## 在 `lerobot/` 子模块中开发 LeRobot
 
-`lerobot/` 是一个 Git 子模块，指向 [Yingminj/lerobot_dev](https://github.com/Yingminj/lerobot_dev.git)，即 `huggingface/lerobot` 的 fork。它只是用来阅读和修改框架的开发副本，**不是**集群实际训练时使用的代码。训练作业跑在 `/opt/robot-platform/train-venv` 中，由 `25-install-training-environment.sh` 从 `LEROBOT_GIT_URL@LEROBOT_GIT_REF` 安装。子模块应保持在与 `LEROBOT_GIT_REF` 相同的提交上（当前为 `v0.6.0`），否则你写出的代码会依赖部署环境里并不存在的 API。
+`lerobot/` 是一个 Git 子模块，指向 [Yingminj/lerobot_dev](https://github.com/Yingminj/lerobot_dev.git)，即 `huggingface/lerobot` 的 fork。它是用来阅读和修改框架的开发副本 —— 在你把它部署出去之前，改动不会对集群产生任何影响。训练作业跑在 `/opt/robot-platform/train-venv` 中，由 `25-install-training-environment.sh` 从 `LEROBOT_GIT_URL@LEROBOT_GIT_REF` 安装，之后再用 `--sync-lerobot` 从这份副本就地更新。子模块应保持在与 `LEROBOT_GIT_REF` 相同的提交上（当前为 `dev`），否则你写出的代码会依赖部署环境里并不存在的 API。
 
 克隆时一并拉取子模块，或事后补齐：
 
@@ -334,9 +334,83 @@ git config --global push.recurseSubmodules check   # 或 on-demand，自动连�
 
 ### 让改动真正生效到集群上
 
-`lerobot_dev` 上的一次提交，本身不会改变 GPU 节点上的任何东西。有两条部署路径：
+`lerobot_dev` 上的一次提交，本身不会改变任何节点上的东西。`/opt` 在节点之间**并不共享**，因此每一个 Slurm 能调度到的节点都需要各自更新一次 —— 用 `sinfo -N -l` 列出全部节点。漏掉一个，作业一旦落到那台机器就会在 `import` 阶段失败，而且往往发生在你以为部署早已完成之后。
 
-- **新策略 —— 用插件。** 将其打包成 `lerobot_policy_<name>` 发行包，在每个节点的 `train-venv` 里 `pip install -e`。`lerobot-train` 会自动导入所有带该前缀的已安装发行包，因此改完即生效，无需重装，也完全不必 fork LeRobot。在 `/etc/robot-platform/model-templates.json` 中登记后即可在 leLab 中选择，注意模板的 `id` 必须等于其 `policy_type`。
+两种角色要做的事并不一样：管理节点负责发布代码并维护 leLab 配置，工作节点只需拉取代码并更新环境。
+
+#### 在管理节点（mgmt01）上
+
+**1. 发布代码。** 顺序是「内容、发布、指针」，见[父仓库记录的是一个提交 ID，不是文件](#父仓库记录的是一个提交-id不是文件)：
+
+```bash
+git -C lerobot add <files>
+git -C lerobot commit -m "..."
+git -C lerobot push origin dev              # 新分支第一次推送需要 -u
+git add lerobot && git commit -m "bump lerobot to ..." && git push
+```
+
+**2. 更新训练环境。**
+
+```bash
+sudo ./scripts/25-install-training-environment.sh --sync-lerobot --apply
+```
+
+该命令把 `lerobot/src/lerobot/` rsync 覆盖到已安装的包上（带 `--delete`，这样你在 fork 中删掉的文件不会继续遮蔽新代码），写入 `SUBMODULE_REVISION`，重新检查 `import lerobot`，并核对 venv 是否仍满足子模块 `pyproject.toml` 中声明的 extras。
+
+它只复制源码，**不**解析依赖。如果你的改动引入了第三方依赖，脚本不会把该节点判为可用，而是打印出需要执行的 `pip install` 命令；同时也请把该依赖写进 `pyproject.toml` 的某个 extra，这样全新安装时无需再手工补装。
+
+**3. 在 leLab 中登记新模型** —— 仅当你新增了 `policy_type` 时才需要。在 `/etc/robot-platform/model-templates.json` 中追加一条；该文件由 `15-install-lelab-platform.sh` 首次安装时生成，此后没有任何脚本会维护它：
+
+```json
+{
+  "id": "act_delta",
+  "label": "ACT (relative actions)",
+  "policy_type": "act_delta",
+  "python_executable": "/opt/robot-platform/train-venv/bin/python",
+  "partition": "train",
+  "min_gpu_memory_mb": 8000,
+  "cpus_per_task": 8,
+  "memory_gb": 48,
+  "description": "..."
+}
+```
+
+`id` 必须等于 `policy_type`；只要有一条违反该规则，或 JSON 格式有误，leLab 会拒绝整份文件 —— 所有人的模型列表都会因此失效，所以改完记得访问一次接口确认。该文件每次请求都会重新读取，无需重启服务。另外请把同一条目同步到纳入版本管理的 `apps/lelab/config/model-templates.json.example`，否则之后新装的节点不会带上它。
+
+在把实验流程建立在 Web 界面上之前，有两个限制值得先知道：leLab 只会下发固定的一组策略参数（`--policy.type`、`.device`、`.use_amp`、`.push_to_hub`、`.repo_id`，见 `apps/lelab/lelab/train.py`），因此需要其他 `--policy.*` 参数的策略变体只能用 `sbatch` 或命令行启动；而由于 `id` 必须等于 `policy_type`，同一个策略也无法登记成多个预设。
+
+#### 在每个 GPU 工作节点（gpu01、gpu02……）上
+
+先拉取，再更新环境。仅此而已 —— 工作节点上没有任何 leLab 配置。
+
+```bash
+git pull
+git submodule update --init --recursive
+sudo ./scripts/25-install-training-environment.sh --sync-lerobot --apply
+```
+
+`--sync-lerobot` 是从**该节点本地**的检出目录复制的，所以真正把改动带过去的是那次拉取；漏掉拉取，脚本会毫无提示地把旧版本再同步一遍。没有本地检出的工作节点可以改从 GitHub 安装：
+
+```bash
+sudo ./scripts/25-install-training-environment.sh --apply
+```
+
+它会从 `LEROBOT_GIT_URL@LEROBOT_GIT_REF` 重建 venv 并重新解析全部依赖 —— 慢得多，但不需要本地克隆，而且能自动带上新增的依赖。
+
+#### 每个节点都要验证
+
+```bash
+/opt/robot-platform/train-venv/bin/python -c \
+  'import lerobot, pathlib; print((pathlib.Path(lerobot.__file__).parent / "SUBMODULE_REVISION").read_text())'
+/opt/robot-platform/train-venv/bin/python -c \
+  'from lerobot.policies.factory import get_policy_class; print(get_policy_class("<policy_type>"))'
+```
+
+第一条打印的是已安装文件真正来自哪个修订版 —— pip 自己的元数据描述的仍是上一次安装的内容，不能作为依据。第二条会在新策略没有注册时立刻报错，否则这个问题只能靠一个启动即失败的训练作业才能发现。
+
+#### 另外两条可选路径
+
+- **新策略且不想改 fork —— 用插件。** 将其打包成 `lerobot_policy_<name>` 发行包，在每个节点的 `train-venv` 里 `pip install -e`。`lerobot-train` 会自动导入所有带该前缀的已安装发行包，因此改完即生效，无需重装，也完全不必 fork LeRobot。但第 3 步的 leLab 模板条目仍然要加。
 - **改框架本身 —— 重新部署版本锚点。** 给 fork 打 tag，把 `config/site.env` 中的 `LEROBOT_GIT_URL` 和 `LEROBOT_GIT_REF` 指向该 tag，然后在每个节点上重跑 `25-install-training-environment.sh --apply`。同时把子模块指针移到同一个 tag，让开发副本与部署环境保持一致。
 
 ## 当前不包含的功能
