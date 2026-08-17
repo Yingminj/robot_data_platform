@@ -267,6 +267,63 @@ def test_slurm_batch_script_exports_the_decoder_cache_size(tmp_path) -> None:
     assert "LEROBOT_VIDEO_DECODER_CACHE_SIZE=1024\n" in override.stdout
 
 
+def _run_batch_script(tmp_path, decoder_cache_size, preamble: str):
+    """Run a generated script under ``preamble`` (used here to set ``ulimit``)."""
+
+    import os
+    import subprocess as sp
+
+    from lelab.runners.slurm import SlurmJobRunner
+
+    script_path = tmp_path / "job.sbatch"
+    script_path.write_text(
+        SlurmJobRunner._batch_script(
+            ["bash", "-c", 'echo "SOFT=$(ulimit -Sn) CACHE=${LEROBOT_VIDEO_DECODER_CACHE_SIZE:-unset}"'],
+            decoder_cache_size,
+        )
+    )
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir(exist_ok=True)
+    (stub_dir / "nvidia-smi").write_text("#!/bin/sh\nexit 0\n")
+    (stub_dir / "nvidia-smi").chmod(0o755)
+    env = {**os.environ, "PATH": f"{stub_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"}
+    env.pop("LEROBOT_VIDEO_DECODER_CACHE_SIZE", None)
+
+    return sp.run(
+        ["bash", "-c", f"{preamble}\nexec bash {script_path}"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_slurm_batch_script_raises_the_open_file_limit(tmp_path) -> None:
+    """One open handle per cached decoder needs more than the inherited soft 1024.
+
+    ``sbatch`` propagates the LeLab service's limits, and systemd defaults the
+    soft one to 1024 -- below the file count of any dataset past ~340 episodes
+    with three cameras. Workers then die on ``OSError: [Errno 24]``.
+    """
+
+    result = _run_batch_script(tmp_path, 360, "ulimit -Sn 256")
+    assert result.returncode == 0, result.stderr
+    soft = int(result.stdout.split("SOFT=")[1].split()[0])
+    assert soft > 256
+
+
+def test_slurm_batch_script_caps_the_decoder_cache_at_the_fd_budget(tmp_path) -> None:
+    """A node that cannot raise the limit far enough falls back to eviction.
+
+    Eviction costs RAM growth and decode time; exhausting the descriptors kills
+    the job outright, so the cap is the better failure.
+    """
+
+    result = _run_batch_script(tmp_path, 360, "ulimit -n 512")
+    assert result.returncode == 0, result.stderr
+    assert "CACHE=256" in result.stdout
+    assert "Capping LEROBOT_VIDEO_DECODER_CACHE_SIZE" in result.stderr
+
+
 def _node(name: str, free_mb: int):
     from lelab.cluster import ClusterNode
 
@@ -377,3 +434,233 @@ def test_policy_probe_reads_the_nodes_own_interpreter() -> None:
     )
     assert quoted.stdout.strip() == "unknown"
     assert quoted.returncode == 0
+
+
+# --- node-local dataset staging -------------------------------------------------
+
+_DF_STUB = """#!/bin/bash
+# Report a filesystem whose free space grows as cached datasets are reclaimed:
+# 3 GiB total, 1 GiB consumed per cached dataset directory.
+root="${!#}"
+count=$(find "$root" -mindepth 1 -maxdepth 1 -type d ! -name '.*' 2>/dev/null | wc -l)
+avail=$(( 3145728 - 1048576 * count ))
+if [ "$avail" -lt 0 ]; then avail=0; fi
+echo "Filesystem 1024-blocks Used Available Capacity Mounted"
+echo "stub 3145728 0 $avail 1% /"
+"""
+
+
+def _make_dataset(root, name, files=("meta/info.json", "data/chunk.parquet")):
+    dataset = root / name
+    for rel in files:
+        path = dataset / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{name}:{rel}")
+    return dataset
+
+
+def _run_staging(tmp_path, src, env_extra=None, stub_df=False):
+    """Run a generated batch script and return (completed_process, resolved_root)."""
+    import os
+    import subprocess as sp
+
+    from lelab.runners.slurm import SlurmJobRunner
+
+    script_path = tmp_path / "job.sbatch"
+    script_path.write_text(
+        SlurmJobRunner._batch_script(
+            ["echo", "TRAIN_ROOT", "--dataset.root", str(src)], None, str(src)
+        )
+    )
+
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir(exist_ok=True)
+    (stub_dir / "nvidia-smi").write_text("#!/bin/sh\nexit 0\n")
+    (stub_dir / "nvidia-smi").chmod(0o755)
+    if stub_df:
+        (stub_dir / "df").write_text(_DF_STUB)
+        (stub_dir / "df").chmod(0o755)
+
+    env = {**os.environ, "PATH": f"{stub_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"}
+    for name in ("HF_HOME", "LELAB_JOB_CACHE_ROOT", "LELAB_DATASET_CACHE_ROOT"):
+        env.pop(name, None)
+    env.update(env_extra or {})
+
+    result = sp.run(["bash", str(script_path)], env=env, capture_output=True, text=True)
+    resolved = None
+    for line in result.stdout.splitlines():
+        if line.startswith("TRAIN_ROOT "):
+            resolved = line.split()[-1]
+    return result, resolved
+
+
+def test_staging_is_inert_until_a_cache_root_is_configured(tmp_path) -> None:
+    """The default must keep reading from the NAS, unchanged."""
+
+    src = _make_dataset(tmp_path, "express")
+    result, resolved = _run_staging(tmp_path, src)
+
+    assert result.returncode == 0, result.stderr
+    assert resolved == str(src)
+
+
+def test_staging_copies_the_dataset_and_trains_from_the_copy(tmp_path) -> None:
+    from lelab.runners.slurm import _STAGE_STAMP, _stage_dir_name
+
+    src = _make_dataset(tmp_path, "express")
+    cache = tmp_path / "cache"
+    cache.mkdir()
+
+    result, resolved = _run_staging(
+        tmp_path,
+        src,
+        {"LELAB_DATASET_CACHE_ROOT": str(cache), "LELAB_DATASET_CACHE_MIN_FREE_GB": "0"},
+    )
+
+    dest = cache / _stage_dir_name(str(src))
+    assert result.returncode == 0, result.stderr
+    assert resolved == str(dest)
+    assert (dest / "meta" / "info.json").read_text() == "express:meta/info.json"
+    assert (dest / _STAGE_STAMP).is_file()
+
+
+def test_staging_refreshes_a_copy_whose_source_changed(tmp_path) -> None:
+    """A dataset that gained episodes must not train from the stale copy."""
+
+    from lelab.runners.slurm import _stage_dir_name
+
+    src = _make_dataset(tmp_path, "express")
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    env = {"LELAB_DATASET_CACHE_ROOT": str(cache), "LELAB_DATASET_CACHE_MIN_FREE_GB": "0"}
+
+    _run_staging(tmp_path, src, env)
+    (src / "data" / "chunk.parquet").write_text("episode-2")
+    (src / "data" / "extra.parquet").write_text("episode-3")
+    result, resolved = _run_staging(tmp_path, src, env)
+
+    dest = cache / _stage_dir_name(str(src))
+    assert result.returncode == 0, result.stderr
+    assert resolved == str(dest)
+    assert (dest / "data" / "chunk.parquet").read_text() == "episode-2"
+    assert (dest / "data" / "extra.parquet").is_file()
+
+
+def test_staging_redoes_an_interrupted_copy(tmp_path) -> None:
+    """A directory with no stamp is a partial copy and must never be trained on."""
+
+    from lelab.runners.slurm import _STAGE_STAMP, _stage_dir_name
+
+    src = _make_dataset(tmp_path, "express")
+    cache = tmp_path / "cache"
+    dest = cache / _stage_dir_name(str(src))
+    (dest / "data").mkdir(parents=True)
+    (dest / "data" / "truncated.parquet").write_text("half a file")
+
+    result, resolved = _run_staging(
+        tmp_path,
+        src,
+        {"LELAB_DATASET_CACHE_ROOT": str(cache), "LELAB_DATASET_CACHE_MIN_FREE_GB": "0"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert resolved == str(dest)
+    assert not (dest / "data" / "truncated.parquet").exists()
+    assert (dest / _STAGE_STAMP).is_file()
+
+
+def test_staging_evicts_least_recently_used_datasets_to_make_room(tmp_path) -> None:
+    import os
+
+    from lelab.runners.slurm import _STAGE_STAMP
+
+    src = _make_dataset(tmp_path, "express")
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    cached = {}
+    for name, stamp_time in (("ds_a", 1000), ("ds_b", 2000), ("ds_c", 3000)):
+        entry = _make_dataset(cache, name)
+        (entry / _STAGE_STAMP).write_text(str(stamp_time))
+        os.utime(entry / _STAGE_STAMP, (stamp_time, stamp_time))
+        cached[name] = entry
+
+    result, _ = _run_staging(
+        tmp_path,
+        src,
+        {"LELAB_DATASET_CACHE_ROOT": str(cache), "LELAB_DATASET_CACHE_MIN_FREE_GB": "1"},
+        stub_df=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not cached["ds_a"].exists(), "the oldest copy should be reclaimed first"
+    assert not cached["ds_b"].exists()
+    assert cached["ds_c"].exists(), "eviction should stop once the dataset fits"
+
+
+def test_staging_never_evicts_a_dataset_another_job_is_reading(tmp_path) -> None:
+    import fcntl
+    import os
+
+    from lelab.runners.slurm import _STAGE_STAMP
+
+    src = _make_dataset(tmp_path, "express")
+    cache = tmp_path / "cache"
+    (cache / ".locks").mkdir(parents=True)
+    cached = {}
+    for name, stamp_time in (("ds_a", 1000), ("ds_b", 2000), ("ds_c", 3000)):
+        entry = _make_dataset(cache, name)
+        (entry / _STAGE_STAMP).write_text(str(stamp_time))
+        os.utime(entry / _STAGE_STAMP, (stamp_time, stamp_time))
+        cached[name] = entry
+
+    # Stand in for a running job holding the shared lock on the oldest copy.
+    lock_path = cache / ".locks" / "ds_a.lock"
+    lock_path.touch()
+    held = os.open(lock_path, os.O_RDWR)
+    fcntl.flock(held, fcntl.LOCK_SH)
+    try:
+        result, _ = _run_staging(
+            tmp_path,
+            src,
+            {"LELAB_DATASET_CACHE_ROOT": str(cache), "LELAB_DATASET_CACHE_MIN_FREE_GB": "1"},
+            stub_df=True,
+        )
+    finally:
+        fcntl.flock(held, fcntl.LOCK_UN)
+        os.close(held)
+
+    assert result.returncode == 0, result.stderr
+    assert cached["ds_a"].exists(), "a dataset in use must survive the sweep"
+    assert not cached["ds_b"].exists()
+
+
+def test_staging_falls_back_to_the_nas_when_the_cache_cannot_fit_it(tmp_path) -> None:
+    """A cache too small to hold the dataset must degrade, not fail the job."""
+
+    src = _make_dataset(tmp_path, "express")
+    cache = tmp_path / "cache"
+    cache.mkdir()
+
+    result, resolved = _run_staging(
+        tmp_path,
+        src,
+        {
+            "LELAB_DATASET_CACHE_ROOT": str(cache),
+            "LELAB_DATASET_CACHE_MIN_FREE_GB": "1000000",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert resolved == str(src)
+    assert "training from the NAS" in result.stderr
+
+
+def test_stage_dir_name_separates_datasets_sharing_a_basename() -> None:
+    from lelab.runners.slurm import _stage_dir_name
+
+    first = _stage_dir_name("/mnt/robot_platform/datasets/team_a/express")
+    second = _stage_dir_name("/mnt/robot_platform/datasets/team_b/express")
+
+    assert first != second
+    assert first.startswith("express-")
+    assert "/" not in first

@@ -11,6 +11,11 @@ Group=robotdata
 WorkingDirectory=/opt/robot-platform/lelab
 EnvironmentFile=/etc/robot-platform/lelab.env
 ExecStart=/opt/robot-platform/lelab-venv/bin/python -m uvicorn lelab.server:app --host 0.0.0.0 --port 8000
+# Slurm propagates the submitting process's rlimits to the job, so systemd's
+# default soft limit of 1024 becomes the training job's limit on the worker.
+# LeRobot's video decoder cache holds one open file per cached video and
+# exhausts that on any dataset past ~1000 video files.
+LimitNOFILE=1048576
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
