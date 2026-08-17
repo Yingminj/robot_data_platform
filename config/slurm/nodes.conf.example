@@ -7,3 +7,5 @@ NodeName=mgmt01 NodeAddr=192.168.100.202 CPUs=FILL_ME Boards=FILL_ME SocketsPerB
 NodeName=gpu01 NodeAddr=192.168.100.215 CPUs=FILL_ME Boards=FILL_ME SocketsPerBoard=FILL_ME CoresPerSocket=FILL_ME ThreadsPerCore=FILL_ME RealMemory=FILL_ME Gres=gpu:1 State=UNKNOWN
 NodeName=gpu02 NodeAddr=192.168.100.216 CPUs=FILL_ME Boards=FILL_ME SocketsPerBoard=FILL_ME CoresPerSocket=FILL_ME ThreadsPerCore=FILL_ME RealMemory=FILL_ME Gres=gpu:1 State=UNKNOWN
 NodeName=gpu03 NodeAddr=192.168.100.217 CPUs=FILL_ME Boards=FILL_ME SocketsPerBoard=FILL_ME CoresPerSocket=FILL_ME ThreadsPerCore=FILL_ME RealMemory=FILL_ME Gres=gpu:1 State=UNKNOWN
+NodeName=gpu04 NodeAddr=192.168.100.206 CPUs=FILL_ME Boards=FILL_ME SocketsPerBoard=FILL_ME CoresPerSocket=FILL_ME ThreadsPerCore=FILL_ME RealMemory=FILL_ME Gres=gpu:1 State=UNKNOWN
+NodeName=gpu05 NodeAddr=192.168.100.209 CPUs=FILL_ME Boards=FILL_ME SocketsPerBoard=FILL_ME CoresPerSocket=FILL_ME ThreadsPerCore=FILL_ME RealMemory=FILL_ME Gres=gpu:1 State=UNKNOWN

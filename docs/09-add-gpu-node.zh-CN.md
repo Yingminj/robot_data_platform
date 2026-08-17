@@ -58,8 +58,8 @@ editor config/site.env
 ```
 
 ```bash
-GPU_NODE_NAMES="mgmt01 gpu01 gpu02 gpu03"
-GPU_NODE_IPS="192.168.100.202 192.168.100.215 192.168.100.216 192.168.100.217"
+GPU_NODE_NAMES="mgmt01 gpu01 gpu02 gpu03 gpu04 gpu05"
+GPU_NODE_IPS="192.168.100.202 192.168.100.215 192.168.100.216 192.168.100.217 192.168.100.206 192.168.100.209"
 ```
 
 两个列表按位置一一对应，长度必须相同，否则 `05-configure-hosts.sh` 会报 `GPU_NODE_NAMES and GPU_NODE_IPS have different lengths`。
@@ -80,7 +80,7 @@ existing managed /etc/hosts block differs; review it manually
 sudo cp -a /etc/hosts /etc/hosts.bak.$(date +%Y%m%d%H%M%S)
 sudo sed -i '/^# BEGIN robot-platform managed hosts$/,/^# END robot-platform managed hosts$/d' /etc/hosts
 sudo ./scripts/05-configure-hosts.sh --apply
-getent hosts mgmt01 gpu01 gpu02 gpu03
+getent hosts mgmt01 gpu01 gpu02 gpu03 gpu04 gpu05
 ```
 
 最后一条必须四行全部解析成功。
