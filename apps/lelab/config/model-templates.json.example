@@ -7,8 +7,30 @@
     "partition": "train",
     "min_gpu_memory_mb": 8000,
     "cpus_per_task": 8,
-    "memory_gb": 32,
+    "memory_gb": 48,
     "description": "LeRobot ACT training using the team-managed environment."
+  },
+  {
+    "id": "act_delta",
+    "label": "ACT (relative actions)",
+    "policy_type": "act_delta",
+    "python_executable": "/opt/robot-platform/train-venv/bin/python",
+    "partition": "train",
+    "min_gpu_memory_mb": 8000,
+    "cpus_per_task": 8,
+    "memory_gb": 48,
+    "description": "ACT that predicts actions relative to the current joint state."
+  },
+  {
+    "id": "act_dit",
+    "label": "ACT-DiT (flow-matching action chunks)",
+    "policy_type": "act_dit",
+    "python_executable": "/opt/robot-platform/train-venv/bin/python",
+    "partition": "train",
+    "min_gpu_memory_mb": 8000,
+    "cpus_per_task": 8,
+    "memory_gb": 48,
+    "description": "ACT encoder + DiT decoder trained with flow matching (no CVAE). Inference runs the decoder 10 times per chunk."
   },
   {
     "id": "diffusion",
@@ -18,7 +40,7 @@
     "partition": "train",
     "min_gpu_memory_mb": 12000,
     "cpus_per_task": 8,
-    "memory_gb": 32,
+    "memory_gb": 48,
     "description": "LeRobot diffusion-policy training."
   },
   {
@@ -29,7 +51,7 @@
     "partition": "train",
     "min_gpu_memory_mb": 12000,
     "cpus_per_task": 8,
-    "memory_gb": 32,
+    "memory_gb": 48,
     "description": "LeRobot VITA training; needs the lerobot[vita] extra in the training venv."
   }
 ]
