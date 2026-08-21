@@ -44,6 +44,17 @@
     "description": "LeRobot diffusion-policy training."
   },
   {
+    "id": "patch_policy",
+    "label": "Patch Policy (frozen DINOv2 patch tokens)",
+    "policy_type": "patch_policy",
+    "python_executable": "/opt/robot-platform/train-venv/bin/python",
+    "partition": "train",
+    "min_gpu_memory_mb": 12000,
+    "cpus_per_task": 8,
+    "memory_gb": 48,
+    "description": "Block-causal transformer over frozen DINOv2 patch tokens; needs the lerobot[patch_policy] extra and downloads the ViT weights on first run."
+  },
+  {
     "id": "vita",
     "label": "VITA (Vision-to-Action Flow Matching)",
     "policy_type": "vita",
