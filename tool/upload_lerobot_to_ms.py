@@ -46,6 +46,8 @@ def build_batches(local_dir: Path, max_files: int, max_bytes: int) -> list[dict]
         if not path.is_file():
             continue
         rel = path.relative_to(local_dir)
+        if any(part.startswith(".") for part in rel.parts):
+            continue  # dotfiles, incl. ModelScope's own .ms_upload_cache
         parts = rel.parts
         if parts[0] == "videos" and len(parts) > 2:
             key = f"videos/{parts[1]}"
