@@ -120,11 +120,14 @@ rsync -a \
 "${python_bin}" -m venv /opt/robot-platform/lelab-venv
 /opt/robot-platform/lelab-venv/bin/pip install --upgrade pip
 
-# LeLab pins LeRobot to GitHub in pyproject.toml. Rewrite only that URL for this
-# pip invocation so deployments can use the site-configured mirror without
-# changing developer installs or writing persistent root Git configuration.
+# LeLab pins LeRobot to upstream v0.6.0 in pyproject.toml — a tag Yingminj's
+# lerobot_dev fork does not carry — so this pip step always tracks the direct
+# upstream URL and never site.env's training-environment fork. Rewrite only that
+# URL for this pip invocation when LELAB_LEROBOT_GIT_URL is set, so a deployment
+# can use a mirror without changing developer installs or writing persistent
+# root Git configuration.
 direct_lerobot_url="https://github.com/huggingface/lerobot.git"
-lerobot_git_url="${LEROBOT_GIT_URL:-${direct_lerobot_url}}"
+lerobot_git_url="${LELAB_LEROBOT_GIT_URL:-${direct_lerobot_url}}"
 git_config="$(mktemp /tmp/lelab-gitconfig.XXXXXX)"
 chmod 0600 "${git_config}"
 git config --file "${git_config}" http.version HTTP/1.1

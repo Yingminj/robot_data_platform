@@ -8,6 +8,7 @@ export interface TrainingConfig {
   // Dataset configuration
   dataset_repo_id: string;
   dataset_root?: string;
+  dataset_image_transforms: boolean;
 
   // Policy configuration
   policy_type: string;
