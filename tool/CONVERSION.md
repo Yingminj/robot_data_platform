@@ -273,6 +273,52 @@ LeRobot 0.6 的官方 `record_loop()` 顺序是 `robot.get_observation()` → `t
 就是恒等映射，只能表达"保持当前位姿"。确认该手臂确实是停放状态再用于训练——
 实测样例中左臂在整个窗口内的关节变化仅 0.0056 rad，属于传感器噪声量级。
 
+### 删除断档行：`--invalid-frame-policy drop`
+
+hold / fill 之外的第三条路：**把断档的那些行直接从数据集里删掉**，而不是补一个假动作。
+由 `--invalid-frame-policy` 控制，它作用于所有对齐容差检查的结果：
+
+| 取值 | 有行越界时 |
+|---|---|
+| `fail`（默认） | 整个 episode 报错拒绝 |
+| `drop` | 越界的行删除，其余行照常写入 |
+
+哪些行会被判为越界，取决于话题种类：
+
+- **末端执行器（夹爪）断档**：与 `--action-gap-policy` 无关。tick 之前最新的夹爪指令 /
+  实测样本超过 `--end-effector-tolerance-ms`（默认 100 ms）时该行即越界，所以单独加
+  `--invalid-frame-policy drop` 就能删掉夹爪断档行；用 `--end-effector-tolerance-ms`
+  调节"多大的断档才算断档"。
+- **手臂 `joint_cmd` 断档**：默认会被 hold / fill 掉，**永远不会**越界。要删这些行必须
+  同时关掉填充：
+
+```bash
+conda run -n lerobot tool/rdp convert \
+  --recipe mcap-gripper-quadtile \
+  --action-gap-policy fail --invalid-frame-policy drop \
+  --input ... --output ... --repo-id ... --task ...
+```
+
+  `--action-gap-policy fail` 让"tick 之后 `--action-tolerance-ms` 内没有指令"的行判为越界，
+  `drop` 再把它们删掉（单独用 `fail` 是整段拒绝）。此组合下 `--action-pair-tolerance-ms`
+  同样参与判定：两臂指令时间偏斜超限的行也会被删。
+
+- 图像 / `joint_states` 超时的行同样被这个开关删除——`drop` 是全局的，不能只对夹爪生效。
+
+删除的行计入 `audit.dropped_frames`，逐项原因见 `audit.invalid_counts`
+（键形如 `image:top`、`arm_state`、`command:/control/joint_cmd_A`、`state:gripper_L`、
+`action:gripper_L`）。全部行都越界时仍然报错。
+
+⚠️ **两个限制**
+
+1. **整段缺失的话题不走这条路。** 某个 `joint_cmd` / 夹爪话题在整个 bag 里一条消息都没有时，
+   它根本不产生有效性掩码，只能由 `--missing-topic-policy` 的 fail / fill 处理（见下节）。
+   `drop` 只处理"有发布、中间断档"的情况。
+2. **删除中间行会悄悄抹平时间空洞。** 写入时不带时间戳列，LeRobot 按
+   `timestamp = frame_index / fps` 推导；中间删掉 40 行后，剩下的帧读起来仍是连续 30 Hz，
+   1.3 s 的空洞消失了。真实时刻只保留在 `timestamps/grid_ns` 里。
+   断档很长时，**拆成两个 episode 比删行更诚实**。
+
 ### 整段缺失的话题：`--missing-topic-policy`
 
 `--action-gap-policy` 处理的是窗口**内部**的断档。但同一台机器不同批次的录制，
@@ -511,7 +557,7 @@ videos/observation.images.top/chunk-000/file-001.mp4   # episode 1，from_timest
 --action-tolerance-ms         默认一帧周期（30 FPS 时 33.33 ms）
 --action-pair-tolerance-ms    默认 5 ms
 --end-effector-tolerance-ms   默认 100 ms
---invalid-frame-policy fail   默认；可选 drop
+--invalid-frame-policy fail   默认；可选 drop（删除越界行，见「删除断档行」）
 --action-gap-policy hold-last-command   默认；可选 joint-state-fill / fail
 --missing-topic-policy fail   默认；可选 fill（需配合 joint-state-fill）
 --max-tick-rate-deviation 0.1 anchor-camera-ticks 下 tick 频率与 --fps 的最大相对偏差
