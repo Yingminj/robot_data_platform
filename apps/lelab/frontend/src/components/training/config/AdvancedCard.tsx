@@ -319,6 +319,23 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({ config, updateConfig }) 
             <SectionHeading>Misc</SectionHeading>
             <div className="flex items-center space-x-3">
               <Switch
+                id="dataset_image_transforms"
+                checked={config.dataset_image_transforms}
+                onCheckedChange={(checked) =>
+                  updateConfig('dataset_image_transforms', checked)
+                }
+              />
+              <Label htmlFor="dataset_image_transforms" className="text-slate-300">
+                Image Augmentation
+              </Label>
+            </div>
+            <p className="text-xs text-slate-400">
+              Randomly applies 3 of brightness, contrast, saturation, hue, sharpness
+              and small affine shifts to each training frame. Does not change the
+              stored dataset.
+            </p>
+            <div className="flex items-center space-x-3">
+              <Switch
                 id="use_policy_training_preset"
                 checked={config.use_policy_training_preset}
                 onCheckedChange={(checked) =>

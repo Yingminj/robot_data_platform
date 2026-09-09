@@ -209,6 +209,47 @@ Resume a node only once the cause is actually fixed:
 sudo scontrol update NodeName=gpu02 State=RESUME
 ```
 
+## 4b. A node stays DRAINED with `Duplicate jobid`
+
+```text
+NODELIST NODES PARTITION   STATE CPUS MEMORY REASON
+gpu01        1     train drained   32  61920 Duplicate jobid
+```
+
+`scontrol show node gpu01` reports `State=IDLE+DRAIN` with `CPUAlloc=0`: the node is healthy
+and empty, only the drain flag is left over. `slurmd` refused a job id it already had in its
+spool — typically after the controller's job counter was reset (`slurmctld` state cleared or
+rebuilt) while a worker still held state for that id.
+
+`slurmd` drops that stale state on restart, so once it has been restarted the only thing left
+to do is clear the flag. Check the restart time and that nothing is queued on it first:
+
+```bash
+scontrol show node gpu01 | grep -E 'State|SlurmdStartTime|Reason'
+squeue -w gpu01
+```
+
+`SlurmdStartTime` later than the timestamp in `Reason` means the stale state is already gone:
+
+```bash
+sudo scontrol update NodeName=gpu01 State=RESUME
+sinfo -n gpu01 -N -o '%N %T %E'
+```
+
+`scontrol update` requires root or the `slurm` user; as an ordinary user it fails with
+`slurm_update error: Invalid user id`, which is a permission problem, not a cluster problem.
+
+If the node drains again with the same reason as soon as a job lands on it, `slurmd` was not
+actually restarted, or the spool survived it. On that node:
+
+```bash
+sudo systemctl restart slurmd
+journalctl -u slurmd -n 100 --no-pager | grep -i 'duplicate\|job'
+```
+
+Only clear `/var/spool/slurmd` by hand when the restart does not help, and only while no job is
+running on the node — that directory also holds the state of live jobs.
+
 ## 5. NFS is mounted but the service account cannot write
 
 Check:

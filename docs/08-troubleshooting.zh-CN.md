@@ -209,6 +209,46 @@ journalctl -u slurmd -u munge -n 150 --no-pager
 sudo scontrol update NodeName=gpu02 State=RESUME
 ```
 
+## 4b. 节点长期 DRAINED，原因是 `Duplicate jobid`
+
+```text
+NODELIST NODES PARTITION   STATE CPUS MEMORY REASON
+gpu01        1     train drained   32  61920 Duplicate jobid
+```
+
+`scontrol show node gpu01` 显示 `State=IDLE+DRAIN`、`CPUAlloc=0`：节点本身健康且空闲，只是
+drain 标记还挂着。原因是 `slurmd` 拒绝了一个它 spool 里已经存在的 job id，通常发生在控制器的
+作业计数被重置（`slurmctld` 状态被清空或重建）而 Worker 仍持有该 id 的状态之后。
+
+`slurmd` 重启即丢弃这份陈旧状态，所以只要它已经重启过，剩下的就只是清标记。先确认重启时间，
+并确认节点上没有排队作业：
+
+```bash
+scontrol show node gpu01 | grep -E 'State|SlurmdStartTime|Reason'
+squeue -w gpu01
+```
+
+`SlurmdStartTime` 晚于 `Reason` 里的时间戳，说明陈旧状态已经没了：
+
+```bash
+sudo scontrol update NodeName=gpu01 State=RESUME
+sinfo -n gpu01 -N -o '%N %T %E'
+```
+
+`scontrol update` 需要 root 或 `slurm` 用户；普通用户执行会得到
+`slurm_update error: Invalid user id`，这是权限问题，不是集群问题。
+
+如果作业一落到该节点就又以同样原因 drain，说明 `slurmd` 并没有真正重启，或 spool 在重启后仍
+残留。在该节点：
+
+```bash
+sudo systemctl restart slurmd
+journalctl -u slurmd -n 100 --no-pager | grep -i 'duplicate\|job'
+```
+
+只有重启无效时才手工清理 `/var/spool/slurmd`，并且必须在该节点没有运行中作业时进行 —— 该目录
+同时保存着在跑作业的状态。
+
 ## 5. NFS 已挂载但服务账号不能写
 
 检查：

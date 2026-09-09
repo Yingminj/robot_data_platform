@@ -41,6 +41,17 @@ def test_minimal_request_yields_well_formed_argv() -> None:
     assert _arg_value(cmd, "--output_dir") == "/tmp/out"
 
 
+def test_image_transforms_flag_only_present_when_enabled() -> None:
+    from lelab.train import TrainingRequest, build_training_command
+
+    req = TrainingRequest(dataset_repo_id="lerobot/pusht")
+    assert "--dataset.image_transforms.enable" not in build_training_command(req, "/tmp/out")
+
+    req2 = TrainingRequest(dataset_repo_id="lerobot/pusht", dataset_image_transforms=True)
+    cmd2 = build_training_command(req2, "/tmp/out")
+    assert _arg_value(cmd2, "--dataset.image_transforms.enable") == "true"
+
+
 def test_optional_dataset_fields_only_present_when_set() -> None:
     from lelab.train import TrainingRequest, build_training_command
 

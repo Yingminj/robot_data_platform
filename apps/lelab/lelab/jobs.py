@@ -231,7 +231,7 @@ def parse_metrics_into(line: str, metrics: TrainingMetrics) -> None:
         lerobot disables its progress bar under Slurm, so for that runner this
         source never fires and total_steps/ETA stay unset here.
       * 'INFO ... step:N smpl:... loss:X grdn:Y lr:Z ...' for loss/lr/grdn
-        (only at log_freq cadence, default every 250 steps).
+        (only at log_freq cadence, default every 1000 steps).
 
     The log-freq step is abbreviated past 999 (see parse_big_number), so it
     only moves current_step forward — never back over tqdm's exact count,
@@ -1172,9 +1172,10 @@ class JobRegistry:
                 )
                 # Dedupe by step: overwrite on consecutive same-step lines.
                 # Past step 1000 lerobot abbreviates the step to the nearest
-                # thousand, so with the default log_freq of 250 this keeps the
-                # newest of every ~4 lines and the curve resolution drops to
-                # one point per 1K steps.
+                # thousand, so the curve resolution is one point per 1K steps.
+                # At the default log_freq of 1000 every line lands on its own
+                # step; a finer log_freq makes this keep the newest of the
+                # lines that collapse onto the same thousand.
                 if points and points[-1].step == point.step:
                     points[-1] = point
                 else:

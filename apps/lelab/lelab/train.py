@@ -35,6 +35,9 @@ class TrainingRequest(BaseModel):
     dataset_revision: str | None = None
     dataset_root: str | None = None
     dataset_episodes: list[int] | None = None
+    # LeRobot's train-time image augmentation (brightness/contrast/saturation/hue/
+    # sharpness/affine, 3 sampled per frame). Off = LeRobot's own default.
+    dataset_image_transforms: bool = False
 
     # Policy configuration
     policy_type: str = "act"
@@ -46,8 +49,8 @@ class TrainingRequest(BaseModel):
     num_workers: int = 4
 
     # Logging and checkpointing
-    log_freq: int = 250
-    save_freq: int = 1000
+    log_freq: int = 1000
+    save_freq: int = 50000
     env_eval_freq: int = 0
     save_checkpoint: bool = True
 
@@ -128,6 +131,8 @@ def build_training_command(
         cmd.extend(["--dataset.root", request.dataset_root])
     if request.dataset_episodes:
         cmd.extend(["--dataset.episodes"] + [str(ep) for ep in request.dataset_episodes])
+    if request.dataset_image_transforms:
+        cmd.extend(["--dataset.image_transforms.enable", "true"])
 
     # Policy
     cmd.extend(["--policy.type", request.policy_type])
