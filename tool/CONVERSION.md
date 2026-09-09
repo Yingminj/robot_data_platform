@@ -86,7 +86,7 @@ conda run -n lerobot tool/rdp convert --recipe mcap-gripper-quadtile \
 
 # 覆盖最常调的两个参数；配方的其余设置保持不变
 conda run -n lerobot tool/rdp convert --recipe mcap-gripper-quadtile \
-  --crf 28 --video-codec libsvtav1 --input ... --output ...
+  --crf 20 --video-codec h264 --input ... --output ...
 
 # 看某个配方到底是什么
 tool/rdp recipes mcap-gripper-quadtile
