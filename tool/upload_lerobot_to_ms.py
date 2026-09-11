@@ -17,13 +17,89 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
+import time
 from pathlib import Path
 
+import modelscope.hub.api as ms_hub_api
 from modelscope.hub.api import HubApi
 
 # Never upload these, whatever the batch.
 GLOBAL_IGNORE = ["**/.DS_Store", "**/.ipynb_checkpoints/**", "**/__pycache__/**", "**/*.tmp"]
+
+# ModelScope caps a repo at 200 commits per rolling hour. upload_folder() splits
+# its input into internal "commit batches" and issues one commit per batch, so a
+# 16-file call can silently become 16 commits. Force: 1 upload_folder call == 1
+# commit, with the batch size we chose ourselves.
+RATE_LIMIT_RE = re.compile(r"try again after\s+(\d+)\s+seconds", re.IGNORECASE)
+
+
+def force_one_commit_per_call(files_per_commit: int) -> None:
+    """Neutralise ModelScope's hidden commit amplification.
+
+    - UPLOAD_ADAPTIVE_BATCH_SIZE slices a small batch into total//10 pieces
+      (16 files -> 16 commits), which alone can burn the hourly quota.
+    - UPLOAD_REACT_ENABLED re-commits failed files in parallel "rounds" behind
+      our back; every one of those rounds is another commit. Our own retry loop
+      already handles failures, so keep the SDK out of it.
+
+    Net effect: one upload_folder() call == one commit.
+    """
+    ms_hub_api.UPLOAD_ADAPTIVE_BATCH_SIZE = False
+    ms_hub_api.UPLOAD_COMMIT_BATCH_SIZE = max(1, files_per_commit)
+    ms_hub_api.UPLOAD_REACT_ENABLED = False
+
+
+class CommitLimiter:
+    """Client-side token bucket for ModelScope's ~200 commits/hour per repo.
+
+    Counting our own batches is not enough: the SDK also commits internally
+    (batch commits, retry rounds). So we wrap HubApi.create_commit and count
+    every request that actually leaves the process.
+    """
+
+    def __init__(self, per_hour: int = 180, window: float = 3600.0):
+        self.per_hour = max(1, per_hour)
+        self.window = window
+        self.calls: list[float] = []
+        self.block_until = 0.0
+
+    def penalize(self, seconds: float) -> None:
+        """Honour a server-sent cooldown ('try again after Ns')."""
+        self.block_until = max(self.block_until, time.time() + seconds)
+
+    def acquire(self) -> None:
+        wait = self.block_until - time.time()
+        if wait > 0:
+            self._sleep(wait)
+            self.block_until = 0.0
+
+        while True:
+            cutoff = time.time() - self.window
+            self.calls = [t for t in self.calls if t > cutoff]
+            if len(self.calls) < self.per_hour:
+                break
+            self._sleep(self.calls[0] - cutoff + 1)
+        self.calls.append(time.time())
+
+    @staticmethod
+    def _sleep(seconds: float) -> None:
+        seconds = max(0.0, seconds)
+        if seconds < 1:
+            return
+        print(f"    commit quota — sleeping {seconds:.0f}s "
+              f"(resume ~{time.strftime('%H:%M:%S', time.localtime(time.time() + seconds))})", flush=True)
+        time.sleep(seconds)
+
+    def attach(self, api: HubApi) -> None:
+        original = api.create_commit
+
+        def counted_create_commit(*args, **kwargs):
+            self.acquire()
+            return original(*args, **kwargs)
+
+        api.create_commit = counted_create_commit  # instance attr shadows the class method
 
 
 def human(nbytes: int) -> str:
@@ -78,6 +154,26 @@ def build_batches(local_dir: Path, max_files: int, max_bytes: int) -> list[dict]
     return batches
 
 
+def run_batch(api: HubApi, *, limiter: CommitLimiter, max_wait: int, attempts: int, **kwargs) -> None:
+    """Commit one batch, honouring ModelScope's 429 cooldown instead of dying."""
+    for attempt in range(1, attempts + 1):
+        try:
+            api.upload_folder(**kwargs)
+            return
+        except Exception as exc:  # noqa: BLE001 - any failure gets the same treatment
+            text = str(exc)
+            rate_limited = "429" in text or "frequency limit" in text.lower()
+            if not rate_limited or attempt == attempts:
+                raise
+            print(f"    commit rejected (attempt {attempt}/{attempts}): {text}", flush=True)
+            match = RATE_LIMIT_RE.search(text)
+            if match:
+                limiter.penalize(min(int(match.group(1)) + 5, max_wait))
+            else:
+                limiter.penalize(min(30 * 2 ** (attempt - 1), max_wait))
+    raise RuntimeError("unreachable")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--local-dir", required=True, type=Path, help="Local LeRobot dataset root")
@@ -87,8 +183,21 @@ def main() -> int:
     parser.add_argument("--private", action="store_true", help="Create the repo private if it does not exist")
     parser.add_argument("--token", default=os.environ.get("MODELSCOPE_API_TOKEN"),
                         help="Defaults to $MODELSCOPE_API_TOKEN or cached login")
-    parser.add_argument("--max-files-per-commit", type=int, default=16)
+    parser.add_argument("--max-files-per-commit", type=int, default=512,
+                        help="Files per commit; also the number of commits is ~files/this "
+                             "(ModelScope allows ~200 commits/hour per repo)")
     parser.add_argument("--max-gb-per-commit", type=float, default=8.0)
+    parser.add_argument("--max-rate-limit-wait", type=int, default=3900,
+                        help="Cap on how long to sleep when the server says 'try again after Ns'")
+    parser.add_argument("--rate-limit-attempts", type=int, default=3,
+                        help="Retries per batch after a 429 before giving up")
+    parser.add_argument("--commit-interval", type=float, default=0.0,
+                        help="Extra sleep between successful commits, to stay under the hourly quota")
+    parser.add_argument("--max-commits-per-hour", type=int, default=180,
+                        help="Client-side cap; stays below the server's 200/h so we never see a 429")
+    parser.add_argument("--cooldown", type=int, default=0,
+                        help="Sleep this many seconds before the first commit, e.g. the N in "
+                             "'try again after N seconds' from an earlier failed run")
     parser.add_argument("--only", action="append", default=None,
                         help="Only upload batches whose group matches this prefix (repeatable), "
                              "e.g. --only data --only videos/observation.images.top")
@@ -125,7 +234,15 @@ def main() -> int:
         print("dry run — nothing uploaded")
         return 0
 
+    force_one_commit_per_call(args.max_files_per_commit)
+    if len(batches) > 150:
+        print(f"warning: {len(batches)} commits planned — ModelScope allows ~200/hour per repo. "
+              f"Raise --max-files-per-commit if this run aborts on a 429.", file=sys.stderr)
+
     api = HubApi()
+    limiter = CommitLimiter(per_hour=args.max_commits_per_hour)
+    limiter.penalize(args.cooldown)  # no-op when 0
+    limiter.attach(api)  # counts every commit request, including the SDK's own
     try:
         api.login(args.token)  # caches the token; also accepts None for cached login
     except Exception as exc:  # noqa: BLE001 - surface any auth failure the same way
@@ -145,7 +262,11 @@ def main() -> int:
         rels = [str(p.relative_to(local_dir)) for p in batch["files"]]
         print(f"\n[{i}/{len(batches)}] uploading {key}: {len(rels)} files, {human(batch['bytes'])}")
         try:
-            api.upload_folder(
+            run_batch(
+                api,
+                limiter=limiter,
+                max_wait=args.max_rate_limit_wait,
+                attempts=args.rate_limit_attempts,
                 repo_id=args.repo_id,
                 repo_type=args.repo_type,
                 folder_path=str(local_dir),
@@ -159,6 +280,8 @@ def main() -> int:
             print("Re-run the same command; completed files are skipped on retry.", file=sys.stderr)
             return 1
         done_bytes += batch["bytes"]
+        if args.commit_interval > 0 and i < len(batches):
+            time.sleep(args.commit_interval)
         print(f"    ok — {human(done_bytes)} / {human(total_bytes)} ({100 * done_bytes / max(total_bytes, 1):.1f}%)")
 
     print(f"\ndone: https://modelscope.cn/{args.repo_type}s/{args.repo_id}/files")
